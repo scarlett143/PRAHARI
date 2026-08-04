@@ -1,0 +1,60 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-prahari}
+      POSTGRES_USER: ${POSTGRES_USER:-prahari}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-local-password}
+    volumes:
+      - prahari_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-prahari} -d ${POSTGRES_DB:-prahari}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      args:
+        INSTALL_QUANTUM: ${INSTALL_QUANTUM:-0}
+        INSTALL_BLOCKCHAIN: ${INSTALL_BLOCKCHAIN:-0}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://prahari:change-this-local-password@db:5432/prahari}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      JWT_SECRET: ${JWT_SECRET:-}
+      PQC_BACKEND: ${PQC_BACKEND:-kyber-py}
+      REKEY_AFTER_MESSAGES: ${REKEY_AFTER_MESSAGES:-100}
+      REKEY_AFTER_MINUTES: ${REKEY_AFTER_MINUTES:-15}
+      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      ANCHOR_CONTRACT_ADDRESS: ${ANCHOR_CONTRACT_ADDRESS:-}
+      ANCHOR_PRIVATE_KEY: ${ANCHOR_PRIVATE_KEY:-}
+      QISKIT_IBM_TOKEN: ${QISKIT_IBM_TOKEN:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  prahari_postgres:

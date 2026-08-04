@@ -1,0 +1,19 @@
+{
+  "name": "prahari-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@noble/curves": "2.2.0",
+    "@noble/post-quantum": "0.6.1",
+    "vite": "7.0.6",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {}
+}

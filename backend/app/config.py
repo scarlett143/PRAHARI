@@ -1,0 +1,76 @@
+"""PRAHARI runtime configuration with fail-safe defaults."""
+from __future__ import annotations
+
+import os
+import secrets
+import sys
+from functools import lru_cache
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+INSECURE_PLACEHOLDERS = {"", "secret", "changeme", "supersecretkey", "your_private_key_here"}
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    environment: str = Field(default="development")
+    database_url: str = Field(
+        default="postgresql+asyncpg://prahari:change-this-local-password@localhost:5432/prahari"
+    )
+    jwt_secret: str = Field(default="")
+    jwt_algorithm: str = Field(default="HS256")
+    access_token_ttl_minutes: int = Field(default=60)
+    pqc_backend: str = Field(default="kyber-py")
+    cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173")
+
+    rekey_after_messages: int = Field(default=100, ge=1)
+    rekey_after_minutes: int = Field(default=15, ge=1)
+    max_message_bytes: int = Field(default=131072, ge=1024)
+
+    polygon_rpc_url: str = Field(default="")
+    anchor_contract_address: str = Field(default="")
+    anchor_private_key: str = Field(default="")
+
+    qiskit_ibm_token: str = Field(default="")
+    qiskit_ibm_instance: str = Field(default="")
+    qiskit_ibm_channel: str = Field(default="ibm_quantum_platform")
+
+    @field_validator("database_url")
+    @classmethod
+    def coerce_async_driver(cls, value: str) -> str:
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if value.startswith("sqlite://") and "aiosqlite" not in value:
+            return value.replace("sqlite://", "sqlite+aiosqlite://", 1)
+        return value
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() in {"production", "prod"}
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    def validate_for_runtime(self) -> None:
+        if self.jwt_secret.strip().lower() in INSECURE_PLACEHOLDERS:
+            if self.is_production:
+                raise RuntimeError("JWT_SECRET must be set to a strong random value in production")
+            self.jwt_secret = secrets.token_urlsafe(48)
+            print("[config] JWT_SECRET unset; using an ephemeral development secret.", file=sys.stderr)
+
+        if self.is_production and self.pqc_backend != "liboqs":
+            print(
+                "[config] WARNING: kyber-py is not constant-time; use liboqs for deployment.",
+                file=sys.stderr,
+            )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    os.environ.setdefault("PQC_BACKEND", settings.pqc_backend)
+    settings.validate_for_runtime()
+    return settings

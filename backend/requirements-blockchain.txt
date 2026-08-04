@@ -1,0 +1,2 @@
+-r requirements.txt
+web3==7.12.0
