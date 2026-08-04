@@ -26,8 +26,9 @@ jobs:
       run:
         working-directory: bridge
     env:
+      # Only the `github` context is available in job-level env -- `runner` is not.
       PYTHONPATH: ${{ github.workspace }}/backend
-      DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/prahari_bridge_test.db
+      DATABASE_URL: sqlite+aiosqlite:///${{ github.workspace }}/prahari_bridge_test.db
       JWT_SECRET: ci-only-secret-long-enough-for-tests
     steps:
       - uses: actions/checkout@v4
