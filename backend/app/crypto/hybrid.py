@@ -1,6 +1,7 @@
 """Hybrid X25519 + ML-KEM-768 agreement -> HKDF-SHA256 -> AES-256 key."""
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -59,9 +60,22 @@ def generate_bundle() -> Tuple[HybridPublicBundle, HybridPrivateBundle]:
     )
 
 
+def transcript_digest(responder: HybridPublicBundle, ciphertext: HybridCiphertext) -> bytes:
+    """Bind the full handshake transcript into 32 bytes.
+
+    The raw transcript is 2336 bytes because ML-KEM-768 keys and ciphertexts are large.
+    OpenSSL-backed HKDF implementations (Node, Deno, Bun, and any embedded/FPGA-side
+    reimplementation) reject an ``info`` longer than 1024 bytes, so hashing first keeps
+    the same binding while staying portable to every runtime we need to target.
+    """
+    return hashlib.sha256(
+        KDF_LABEL + responder.to_transcript() + ciphertext.to_transcript()
+    ).digest()
+
+
 def _derive(*, x25519_secret: bytes, ml_kem_secret: bytes,
             responder: HybridPublicBundle, ciphertext: HybridCiphertext) -> bytes:
-    info = KDF_LABEL + responder.to_transcript() + ciphertext.to_transcript()
+    info = KDF_LABEL + transcript_digest(responder, ciphertext)
     return HKDF(
         algorithm=hashes.SHA256(),
         length=AES_256_KEY_BYTES,

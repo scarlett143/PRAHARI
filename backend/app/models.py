@@ -8,6 +8,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -40,6 +41,12 @@ channel_members = Table(
 )
 
 
+#: A peer is either a human operator or an unmanned endpoint. Both hold their own
+#: Ed25519/X25519/ML-KEM private keys and establish the *same* two-party hybrid session,
+#: so nothing downstream of identity needs to know which kind it is talking to.
+PEER_KINDS = ("human", "uav", "gcs")
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -48,6 +55,7 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     role = Column(String(16), nullable=False, default="member")
     status = Column(String(16), nullable=False, default="active")
+    kind = Column(String(16), nullable=False, default="human", index=True)
 
     ed25519_public_key = Column(LargeBinary(32), nullable=False)
     key_verified = Column(Boolean, nullable=False, default=False)
@@ -118,8 +126,54 @@ class AnchorBatch(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class UavProfile(Base):
+    """Non-secret registry data for an unmanned endpoint.
+
+    Deliberately holds no key material: the UAV's private keys live on the aircraft, and
+    its telemetry travels as opaque AES-GCM envelopes like any other message. What the
+    server learns here is the same class of metadata it already learns about human
+    accounts -- an identifier, an owner, and liveness -- as recorded in the threat model.
+    """
+
+    __tablename__ = "uav_profiles"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True
+    )
+    operator_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    callsign = Column(String(64), unique=True, nullable=False, index=True)
+    airframe = Column(String(96), nullable=True)
+    fleet = Column(String(96), nullable=False, default="default", index=True)
+
+    #: Single-use provisioning secret, stored only as a hash. Cleared on enrolment.
+    enrollment_token_hash = Column(String, nullable=True)
+    enrolled_at = Column(DateTime(timezone=True), nullable=True)
+
+    #: Device re-authentication nonce. An aircraft holds no password, so it proves its
+    #: identity by signing a fresh challenge with the Ed25519 key bound at enrolment.
+    #: Kept separate from User.pending_challenge so key publication and token renewal
+    #: cannot clobber each other.
+    auth_challenge = Column(String, nullable=True)
+    auth_challenge_issued_at = Column(DateTime(timezone=True), nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    #: Dedicated two-party channel carrying the encrypted C2/telemetry link.
+    link_channel_id = Column(
+        String, ForeignKey("channels.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        # Hot path for both chat history and telemetry replay:
+        # WHERE channel_id = ? ORDER BY created_at DESC LIMIT n
+        Index("ix_messages_channel_created", "channel_id", "created_at"),
+        # Anchor batching scans unanchored messages in a stable total order.
+        Index("ix_messages_batch_created_id", "anchor_batch_id", "created_at", "id"),
+    )
 
     id = Column(String, primary_key=True, default=_uuid)
     client_message_id = Column(String(64), unique=True, nullable=False, index=True)

@@ -1,73 +1,169 @@
-import { useEffect, useState } from "react";
-import { api, getApiUrl, getToken, setToken } from "./api/client.js";
+import { useCallback, useEffect, useState } from "react";
+import { authApi, getToken, setToken } from "./lib/api.js";
+import { useRealtime } from "./lib/useRealtime.js";
 import { loadIdentity } from "./storage/keys.js";
-import AuthPage from "./pages/AuthPage.jsx";
-import ChatPage from "./pages/ChatPage.jsx";
-import AnchorsPage from "./pages/AnchorsPage.jsx";
-import QuantumPage from "./pages/QuantumPage.jsx";
-import SecurityPage from "./pages/SecurityPage.jsx";
+import { Badge, Mark, Spinner } from "./components/ui.jsx";
+import AuthRoute from "./routes/AuthRoute.jsx";
+import MessagingRoute from "./routes/MessagingRoute.jsx";
+import FleetRoute from "./routes/FleetRoute.jsx";
+import LinkConsoleRoute from "./routes/LinkConsoleRoute.jsx";
+import ProofsRoute from "./routes/ProofsRoute.jsx";
+import QuantumRoute from "./routes/QuantumRoute.jsx";
+import SecurityRoute from "./routes/SecurityRoute.jsx";
+
+const VIEWS = [
+  { id: "messaging", label: "Messaging", glyph: "◈", title: "Secure messaging" },
+  { id: "fleet", label: "Fleet", glyph: "◭", title: "Fleet registry" },
+  { id: "proofs", label: "Proofs", glyph: "◇", title: "Merkle anchors" },
+  { id: "quantum", label: "Quantum lab", glyph: "◉", title: "Quantum security lab" },
+  { id: "security", label: "Security", glyph: "✓", title: "Security posture" },
+];
+
+const THEME_KEY = "prahari_theme";
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [identity, setIdentity] = useState(null);
-  const [view, setView] = useState("chat");
-  const [socketEvent, setSocketEvent] = useState(null);
+  const [view, setView] = useState("messaging");
+  const [consoleTarget, setConsoleTarget] = useState(null);
   const [checking, setChecking] = useState(true);
-
-  async function acceptUser(nextUser) {
-    setUser(nextUser);
-    setIdentity(await loadIdentity(nextUser.username));
-  }
+  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "dark");
 
   useEffect(() => {
-    if (!getToken()) { setChecking(false); return; }
-    api("/api/v2/auth/me").then(acceptUser).catch(() => setToken("")).finally(() => setChecking(false));
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
+
+  const acceptUser = useCallback(async (nextUser) => {
+    setUser(nextUser);
+    setIdentity(await loadIdentity(nextUser.username));
   }, []);
 
   useEffect(() => {
-    if (!user || !getToken()) return undefined;
-    const wsUrl = getApiUrl().replace(/^http/, "ws") + `/ws?token=${encodeURIComponent(getToken())}`;
-    const socket = new WebSocket(wsUrl);
-    socket.onmessage = (event) => {
-      try { setSocketEvent(JSON.parse(event.data)); } catch {}
-    };
-    const keepalive = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) socket.send("ping");
-    }, 25000);
-    return () => { clearInterval(keepalive); socket.close(); };
-  }, [user?.id]);
+    if (!getToken()) {
+      setChecking(false);
+      return;
+    }
+    authApi
+      .me()
+      .then(acceptUser)
+      .catch(() => setToken(""))
+      .finally(() => setChecking(false));
+  }, [acceptUser]);
 
-  function logout() {
+  const { event: socketEvent, status: socketStatus } = useRealtime(Boolean(user));
+
+  function signOut() {
     setToken("");
     setUser(null);
     setIdentity(null);
-    setView("chat");
+    setConsoleTarget(null);
+    setView("messaging");
   }
 
-  if (checking) return <main className="loading-screen"><div className="shield pulse">P</div><p>Checking secure session…</p></main>;
-  if (!user) return <AuthPage onAuthenticated={acceptUser} />;
+  if (checking) return <Spinner label="Checking secure session…" />;
+  if (!user) return <AuthRoute onAuthenticated={acceptUser} />;
+
+  const active = consoleTarget
+    ? { title: `Link · ${consoleTarget.callsign}` }
+    : VIEWS.find((item) => item.id === view) ?? VIEWS[0];
 
   return (
-    <main className="app-shell">
-      <aside className="nav-rail">
-        <div className="nav-brand"><div className="shield small">P</div><strong>PRAHARI</strong></div>
-        <nav>
-          <button className={view === "chat" ? "active" : ""} onClick={() => setView("chat")}><span>⌁</span>Encrypted Chat</button>
-          <button className={view === "anchors" ? "active" : ""} onClick={() => setView("anchors")}><span>◇</span>Merkle Proofs</button>
-          <button className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><span>◉</span>Quantum Lab</button>
-          <button className={view === "security" ? "active" : ""} onClick={() => setView("security")}><span>✓</span>Security</button>
-        </nav>
-        <div className="account-card"><div className="avatar">{user.username[0]?.toUpperCase()}</div><div><strong>{user.username}</strong><span>{user.key_verified ? "Verified identity" : "Keys unverified"}</span></div><button onClick={logout}>↪</button></div>
-      </aside>
-      <section className="content-shell">
-        <header className="topbar"><div><span className="live-dot" /> API connected</div><div className="crypto-strip"><span>AES-256-GCM</span><span>X25519</span><span>ML-KEM-768</span><span>Ed25519</span></div></header>
-        <div className="content-area">
-          {view === "chat" && <ChatPage user={user} identity={identity} socketEvent={socketEvent} />}
-          {view === "anchors" && <AnchorsPage />}
-          {view === "quantum" && <QuantumPage />}
-          {view === "security" && <SecurityPage identityAvailable={Boolean(identity)} />}
+    <div className="app-shell">
+      <a className="skip-link" href="#main">Skip to content</a>
+
+      <aside className="rail">
+        <div className="rail__brand">
+          <Mark />
+          <div>
+            <strong>PRAHARI</strong>
+            <div className="eyebrow">Secure comms</div>
+          </div>
         </div>
-      </section>
-    </main>
+
+        <nav className="rail__nav" aria-label="Primary">
+          {VIEWS.map((item) => (
+            <button
+              key={item.id}
+              className={!consoleTarget && view === item.id ? "nav-item nav-item--active" : "nav-item"}
+              aria-current={!consoleTarget && view === item.id ? "page" : undefined}
+              onClick={() => {
+                setConsoleTarget(null);
+                setView(item.id);
+              }}
+            >
+              <span aria-hidden="true">{item.glyph}</span>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="rail__spacer" />
+
+        <div className="rail__section">
+          <div className="eyebrow">Signed in</div>
+          <p className="truncate"><strong>{user.username}</strong></p>
+          {user.key_verified ? (
+            <Badge tone="good">identity verified</Badge>
+          ) : (
+            <Badge tone="warning">keys unpublished</Badge>
+          )}
+        </div>
+
+        <div className="rail__nav">
+          <button className="nav-item" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            <span aria-hidden="true">{theme === "dark" ? "☾" : "☀"}</span>
+            {theme === "dark" ? "Dark theme" : "Light theme"}
+          </button>
+          <button className="nav-item" onClick={signOut}>
+            <span aria-hidden="true">⤶</span>
+            Sign out
+          </button>
+        </div>
+      </aside>
+
+      <div className="main">
+        <header className="topbar">
+          <div className="topbar__title">
+            <h2>{active.title}</h2>
+          </div>
+          <div className="topbar__actions">
+            <Badge tone={socketStatus === "open" ? "good" : "warning"}>
+              <span
+                className={socketStatus === "open" ? "dot dot--pulse" : "dot"}
+                aria-hidden="true"
+              />
+              {socketStatus === "open" ? "realtime connected" : `realtime ${socketStatus}`}
+            </Badge>
+            <Badge>AES-256-GCM</Badge>
+            <Badge>X25519</Badge>
+            <Badge>ML-KEM-768</Badge>
+            <Badge>Ed25519</Badge>
+          </div>
+        </header>
+
+        <main className="view" id="main">
+          {consoleTarget ? (
+            <LinkConsoleRoute
+              target={consoleTarget}
+              user={user}
+              identity={identity}
+              socketEvent={socketEvent}
+              onBack={() => setConsoleTarget(null)}
+            />
+          ) : view === "messaging" ? (
+            <MessagingRoute user={user} identity={identity} socketEvent={socketEvent} />
+          ) : view === "fleet" ? (
+            <FleetRoute onOpenConsole={setConsoleTarget} />
+          ) : view === "proofs" ? (
+            <ProofsRoute />
+          ) : view === "quantum" ? (
+            <QuantumRoute />
+          ) : (
+            <SecurityRoute identityAvailable={Boolean(identity)} />
+          )}
+        </main>
+      </div>
+    </div>
   );
 }

@@ -33,7 +33,20 @@ async function get(key) {
   });
 }
 
-export const saveIdentity = (username, value) => put(`identity:${username}`, value);
 export const loadIdentity = (username) => get(`identity:${username}`);
+
+/**
+ * Overwriting an identity destroys the only copy of that user's private keys and makes
+ * every message they ever received permanently undecryptable. Refuse by default so a
+ * mistyped username on the register screen cannot silently wipe a real account.
+ */
+export async function saveIdentity(username, value, { overwrite = false } = {}) {
+  if (!overwrite && (await loadIdentity(username))) {
+    throw new Error(
+      `An identity for "${username}" already exists in this browser. Log in instead — registering again would destroy the private keys that decrypt your messages.`,
+    );
+  }
+  return put(`identity:${username}`, value);
+}
 export const saveSessionKey = (channelId, epoch, value) => put(`session:${channelId}:${epoch}`, value);
 export const loadSessionKey = (channelId, epoch) => get(`session:${channelId}:${epoch}`);

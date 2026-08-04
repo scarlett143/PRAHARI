@@ -123,6 +123,7 @@ async def me(user: CurrentUser):
         "id": user.id,
         "username": user.username,
         "role": user.role,
+        "kind": user.kind,
         "status": user.status,
         "key_verified": user.key_verified,
         "created_at": user.created_at,

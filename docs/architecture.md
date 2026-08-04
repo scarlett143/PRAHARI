@@ -64,3 +64,53 @@ Unanchored message content hashes are domain-separated into leaves and combined 
 ## Quantum demo layer
 
 The optional QRNG path uses Qiskit Aer when installed. BB84 is presented as a protocol simulation with QBER metrics. Quantum output is mixed with local system entropy only for experiments; it never replaces local CSPRNG secrecy.
+
+## Unmanned endpoints
+
+An aircraft is not a special case of the protocol. It is an ordinary peer:
+
+- it generates Ed25519, X25519 and ML-KEM-768 private keys locally, in a keystore
+  file that never leaves the airframe;
+- it publishes a signed public bundle through the same `/keys/publish` path a
+  browser uses;
+- it joins a two-member channel with its operator and runs the same deterministic
+  initiator rule, the same signed session offer, and the same HKDF derivation;
+- its telemetry and the operator's commands travel as the same AES-256-GCM
+  envelopes, with the same `prahari-v1 | sender | channel | epoch` associated data.
+
+Nothing downstream of identity knows whether it is talking to a person or an
+airframe, which is the point: there is one protocol to review, one to test, and
+one to get right.
+
+### Provisioning and credentials
+
+An aircraft holds no password, so the credential chain is:
+
+1. **Provision** — the operator creates the record; the server returns a 256-bit
+   enrolment token once and stores only its SHA-256 hash.
+2. **Enrol** — the aircraft redeems that token and binds its real Ed25519 public
+   key. The token is cleared on use.
+3. **Re-authenticate** — thereafter the aircraft requests a nonce and signs it
+   with the enrolment-bound Ed25519 key to obtain a fresh access token. The nonce
+   is single-use, so a captured signature cannot be replayed.
+
+The device-authentication nonce is stored separately from `User.pending_challenge`
+so that token renewal and key publication cannot clobber one another.
+
+### What the server learns
+
+The same class of metadata it already learns about human accounts: a callsign, an
+owner, a fleet label, liveness, ciphertext sizes, and timestamps. Position,
+attitude, battery state and commands are inside the envelope and are decrypted
+only in the operator's browser — the ground console renders telemetry the backend
+could not have rendered for it.
+
+## Handshake transcript binding
+
+The HKDF `info` is `KDF_LABEL || SHA-256(KDF_LABEL || responder bundle || ciphertext)`.
+
+The raw transcript is 2336 bytes because ML-KEM-768 keys and ciphertexts are
+large, and OpenSSL-backed HKDF implementations reject an `info` longer than 1024
+bytes. Hashing first preserves the binding while keeping the derivation portable
+to Node, Deno, Bun, React Native and any embedded or FPGA-side reimplementation —
+which matters directly for the aircraft side of the link.

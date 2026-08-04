@@ -24,6 +24,8 @@ async def search_users(
         User.status == "active",
         User.key_verified.is_(True),
         User.id != user.id,
+        # Unmanned endpoints are reached through the fleet APIs, not user search.
+        User.kind == "human",
     )
     if query.strip():
         statement = statement.where(User.username.ilike(f"%{query.strip()}%"))

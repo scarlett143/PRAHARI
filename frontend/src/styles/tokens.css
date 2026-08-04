@@ -1,0 +1,153 @@
+/* =============================================================================
+   PRAHARI Console — design tokens
+   =============================================================================
+   Dark-first: the primary context is an operations console, often on a dim
+   screen. Light mode is a selected set of steps against the light surface, not
+   an inverted copy.
+
+   The six chart series hues are validated for colour-vision deficiency against
+   these exact surfaces (see docs/design-system.md for the validator output).
+   Do not re-order or substitute them without re-validating -- the slot ORDER is
+   the CVD-safety mechanism, not a cosmetic choice.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* -- surfaces ----------------------------------------------------------- */
+  --page: #0b0f12;
+  --surface: #0f1418;
+  --surface-raised: #151c21;
+  --surface-sunken: #080b0e;
+  --surface-hover: #1b242a;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  /* -- ink ---------------------------------------------------------------- */
+  --ink: #f1f5f7;
+  --ink-secondary: #a2b0b9;
+  --ink-muted: #6d7d87;
+  --ink-inverse: #0b0f12;
+
+  /* -- brand / interactive ------------------------------------------------
+     Reserved for interaction and identity. Never used to encode data --
+     otherwise a button and a series would claim the same meaning. */
+  --accent: #35d0b8;
+  --accent-hover: #4fe0ca;
+  --accent-ink: #04211d;
+  --accent-wash: rgba(53, 208, 184, 0.12);
+  --focus-ring: rgba(53, 208, 184, 0.55);
+
+  /* -- status (reserved; never reused as a series) ------------------------ */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --good-wash: rgba(12, 163, 12, 0.14);
+  --warning-wash: rgba(250, 178, 25, 0.14);
+  --critical-wash: rgba(208, 59, 59, 0.14);
+
+  /* -- chart series (validated order — do not shuffle) -------------------- */
+  --series-1: #3987e5; /* blue    */
+  --series-2: #d95926; /* orange  */
+  --series-3: #199e70; /* aqua    */
+  --series-4: #c98500; /* yellow  */
+  --series-5: #d55181; /* magenta */
+  --series-6: #008300; /* green   */
+
+  /* -- chart chrome ------------------------------------------------------- */
+  --gridline: #202a30;
+  --axis: #33424a;
+
+  /* -- typography --------------------------------------------------------- */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-hero: 2.75rem;
+
+  --weight-regular: 400;
+  --weight-medium: 550;
+  --weight-bold: 680;
+
+  --leading-tight: 1.2;
+  --leading-normal: 1.55;
+  --tracking-wide: 0.08em;
+
+  /* -- space (4px base) --------------------------------------------------- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+  --sp-8: 4rem;
+
+  /* -- radius / elevation / motion ---------------------------------------- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+  --rail-width: 232px;
+  --content-max: 1600px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --page: #f2f4f3;
+  --surface: #f7f8f7;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eaedec;
+  --surface-hover: #e9ecec;
+  --border: rgba(11, 15, 18, 0.12);
+  --border-strong: rgba(11, 15, 18, 0.22);
+
+  --ink: #0b0f12;
+  --ink-secondary: #4a565d;
+  --ink-muted: #6d7d87;
+  --ink-inverse: #f7f8f7;
+
+  --accent: #0a8f7d;
+  --accent-hover: #077a6b;
+  --accent-ink: #ffffff;
+  --accent-wash: rgba(10, 143, 125, 0.1);
+  --focus-ring: rgba(10, 143, 125, 0.5);
+
+  /* Light steps of the same six hues, validated against #f7f8f7. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+
+  --gridline: #dfe3e2;
+  --axis: #c2c9c7;
+
+  --shadow-sm: 0 1px 2px rgba(11, 15, 18, 0.08);
+  --shadow-md: 0 8px 24px rgba(11, 15, 18, 0.1);
+  --shadow-lg: 0 20px 48px rgba(11, 15, 18, 0.14);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-med: 0ms;
+  }
+}

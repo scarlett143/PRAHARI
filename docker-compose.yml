@@ -8,6 +8,14 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-local-password}
     volumes:
       - prahari_postgres:/var/lib/postgresql/data
+    # Sized for the 1000-endpoint target: the API pool can reach
+    # db_pool_size + db_max_overflow per process, plus headroom for maintenance.
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-prahari} -d ${POSTGRES_DB:-prahari}"]
       interval: 5s
@@ -30,6 +38,10 @@ services:
       PQC_BACKEND: ${PQC_BACKEND:-kyber-py}
       REKEY_AFTER_MESSAGES: ${REKEY_AFTER_MESSAGES:-100}
       REKEY_AFTER_MINUTES: ${REKEY_AFTER_MINUTES:-15}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-30}
+      MAX_WEBSOCKET_CONNECTIONS: ${MAX_WEBSOCKET_CONNECTIONS:-2000}
       POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
       ANCHOR_CONTRACT_ADDRESS: ${ANCHOR_CONTRACT_ADDRESS:-}
       ANCHOR_PRIVATE_KEY: ${ANCHOR_PRIVATE_KEY:-}
@@ -39,22 +51,44 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Baked into the bundle at build time. Point this at the API URL that
+        # BROWSERS will use -- not an internal compose hostname.
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     restart: unless-stopped
-    environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     ports:
       - "5173:5173"
     depends_on:
       backend:
         condition: service_healthy
 
+  # Optional aircraft agent. Not started by default:
+  #   docker compose --profile bridge up
+  # Provision and link the aircraft first, then supply its callsign, token and
+  # channel id. See README "Encrypted UAV link".
+  bridge:
+    profiles: ["bridge"]
+    build:
+      context: .
+      dockerfile: bridge/Dockerfile
+    restart: unless-stopped
+    environment:
+      PRAHARI_API_URL: ${PRAHARI_API_URL:-http://backend:8000}
+      PRAHARI_CALLSIGN: ${PRAHARI_CALLSIGN:?set PRAHARI_CALLSIGN to the provisioned callsign}
+      PRAHARI_ENROLLMENT_TOKEN: ${PRAHARI_ENROLLMENT_TOKEN:-}
+      PRAHARI_CHANNEL_ID: ${PRAHARI_CHANNEL_ID:-}
+      PRAHARI_SOURCE: ${PRAHARI_SOURCE:-synthetic}
+      PRAHARI_MAVLINK_DEVICE: ${PRAHARI_MAVLINK_DEVICE:-udpin:0.0.0.0:14550}
+    volumes:
+      - prahari_keystore:/keystore
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   prahari_postgres:
+  prahari_keystore:

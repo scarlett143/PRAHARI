@@ -49,3 +49,37 @@ The QRNG/BB84 screens are research demonstrations. Cloud-delivered quantum rando
 - production ZKP circuits
 - traffic-analysis resistance
 - HSM/mobile secure-enclave integration
+
+## Unmanned endpoints
+
+### What is protected
+
+An aircraft holds its own Ed25519, X25519 and ML-KEM-768 private keys and derives
+the session key locally. Telemetry and commands are AES-256-GCM envelopes bound to
+sender, channel and epoch. A compromised server can deny service, reorder or drop
+frames, and observe metadata — it cannot read position, attitude or commands, and
+it cannot forge a frame that will authenticate.
+
+### Provisioning trust
+
+The enrolment token is a bearer credential for exactly one provisioned record. It
+is single-use, hashed at rest, and grants nothing beyond binding an identity key
+to that callsign. An attacker who intercepts a token before the aircraft redeems
+it can enrol an impostor under that callsign — so tokens must be delivered over a
+trusted channel, and an unexpected `fleet.uav_enrolled` audit event is a signal
+worth alerting on.
+
+### Keystore compromise
+
+The keystore file is the aircraft's entire identity. Physical capture of the
+airframe yields it, and with it the ability to impersonate that aircraft and to
+decrypt sessions it holds keys for. Epoch rotation limits the window but does not
+close it: there is no per-message forward secrecy. Hardware-backed key storage on
+the airframe is the real mitigation and is not implemented here.
+
+### Not addressed
+
+Nothing in this repository addresses the RF layer: jamming, meaconing, direction
+finding, or traffic analysis of the physical link. Those are properties of the
+radio and waveform, not of the application protocol. Encrypting the payload does
+not make a link hard to find or hard to disrupt.

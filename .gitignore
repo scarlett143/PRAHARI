@@ -22,3 +22,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# On-aircraft private keys — never commit these
+uav-keystore.json
+*-keystore.json

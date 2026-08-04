@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from ..database import get_session_factory
 from ..models import User
-from ..realtime import manager
+from ..realtime import ConnectionLimitReached, manager
 from ..security import decode_access_token
 
 router = APIRouter(tags=["websocket"])
@@ -27,7 +27,14 @@ async def websocket_endpoint(websocket: WebSocket):
             return
         user_id = user.id
 
-    await manager.connect(user_id, websocket)
+    try:
+        await manager.connect(user_id, websocket)
+    except ConnectionLimitReached:
+        # 1013 "try again later" tells a well-behaved client to back off and retry
+        # rather than treating this as a permanent authentication failure.
+        await websocket.close(code=1013)
+        return
+
     try:
         await websocket.send_json({"type": "connected", "user_id": user_id})
         while True:

@@ -1,0 +1,8 @@
+# The bridge reuses the backend's audited crypto modules, so it needs their dependencies.
+cryptography==45.0.5
+kyber-py==1.0.1
+httpx==0.28.1
+
+# Real MAVLink 2 from ArduPilot/PX4 SITL or a serial radio.
+# Omit this to run with --source synthetic only.
+pymavlink==2.4.42

@@ -1,4 +1,4 @@
-import { api } from "../api/client.js";
+import { api } from "../lib/api.js";
 import { loadSessionKey, saveSessionKey } from "../storage/keys.js";
 import { base64ToBytes, bytesToBase64 } from "./bytes.js";
 import { signSessionOffer, verifyRemoteBundle, verifySessionOffer } from "./identity.js";
@@ -35,10 +35,31 @@ export async function ensureSession(channel, user, identity, targetEpoch = chann
       ...offer,
     };
     signedOffer.offer_signature = signSessionOffer(identity, signedOffer);
-    await api("/api/v2/sessions/offers", {
-      method: "POST",
-      body: JSON.stringify(signedOffer),
-    });
+    let stored;
+    try {
+      stored = await api("/api/v2/sessions/offers", {
+        method: "POST",
+        body: JSON.stringify(signedOffer),
+      });
+    } catch (error) {
+      if (error.detail?.code === "session_offer_exists") {
+        throw new Error(
+          "Another session offer already exists for this epoch and its private ephemeral is not in this browser. Rotate the channel to the next epoch.",
+        );
+      }
+      throw error;
+    }
+    // The server keeps exactly one offer per epoch. If what came back is not the offer we
+    // just signed, our key was derived from an ephemeral nobody else can reproduce, so
+    // storing it would silently break every message. Fail loudly instead.
+    if (
+      stored.x25519_ephemeral_public !== signedOffer.x25519_ephemeral_public ||
+      stored.ml_kem_ciphertext !== signedOffer.ml_kem_ciphertext
+    ) {
+      throw new Error(
+        "The server returned a different session offer for this epoch. Rotate the channel to the next epoch to establish a fresh session.",
+      );
+    }
     await saveSessionKey(channel.id, targetEpoch, bytesToBase64(key));
     return key;
   }

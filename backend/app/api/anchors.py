@@ -32,7 +32,10 @@ async def build_batch(
                 Message.anchor_batch_id.is_(None),
                 channel_members.c.user_id == user.id,
             )
-            .order_by(Message.created_at.asc())
+            # created_at alone is not unique (SQLite CURRENT_TIMESTAMP is second-precision),
+            # so ties would order differently here than when the proof is rebuilt and the
+            # recomputed root would not match the stored one. id breaks the tie.
+            .order_by(Message.created_at.asc(), Message.id.asc())
             .limit(min(max(limit, 1), 1000))
         )
     ).scalars().all()
@@ -125,7 +128,7 @@ async def inclusion_proof(
         await db.execute(
             select(Message)
             .where(Message.anchor_batch_id == batch.id)
-            .order_by(Message.created_at.asc())
+            .order_by(Message.created_at.asc(), Message.id.asc())
         )
     ).scalars().all()
     index = next((i for i, message in enumerate(messages) if message.id == message_id), None)

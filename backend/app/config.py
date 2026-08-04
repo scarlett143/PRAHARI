@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     rekey_after_minutes: int = Field(default=15, ge=1)
     max_message_bytes: int = Field(default=131072, ge=1024)
 
+    # Sized for the 1000-endpoint target. Every aircraft holds one long-lived WebSocket
+    # plus short REST bursts, so concurrent *database* work is far below the endpoint
+    # count; these defaults leave headroom without exhausting PostgreSQL's max_connections.
+    db_pool_size: int = Field(default=20, ge=1)
+    db_max_overflow: int = Field(default=30, ge=0)
+    db_pool_timeout_seconds: int = Field(default=30, ge=1)
+    db_pool_recycle_seconds: int = Field(default=1800, ge=60)
+    #: Upper bound on simultaneous WebSocket clients. 0 disables the limit.
+    max_websocket_connections: int = Field(default=2000, ge=0)
+
     polygon_rpc_url: str = Field(default="")
     anchor_contract_address: str = Field(default="")
     anchor_private_key: str = Field(default="")

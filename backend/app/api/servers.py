@@ -115,22 +115,49 @@ async def add_member(
         await db.execute(server_members.insert().values(server_id=server.id, user_id=target.id))
 
     channels = (await db.execute(select(Channel).where(Channel.server_id == server.id))).scalars().all()
+    joined: list[str] = []
+    skipped: list[str] = []
     for channel in channels:
-        current = await db.execute(
-            select(channel_members.c.user_id).where(
-                channel_members.c.channel_id == channel.id,
-                channel_members.c.user_id == target.id,
-            )
-        )
-        if current.first() is None:
-            await db.execute(channel_members.insert().values(channel_id=channel.id, user_id=target.id))
+        member_ids = {
+            row[0]
+            for row in (
+                await db.execute(
+                    select(channel_members.c.user_id).where(
+                        channel_members.c.channel_id == channel.id
+                    )
+                )
+            ).all()
+        }
+        if target.id in member_ids:
+            joined.append(channel.name)
+            continue
+        # The hybrid session layer is strictly two-party. Dropping a third member into a
+        # channel that already has two would leave it permanently unable to establish a
+        # session key, silently breaking encryption for everyone already in it.
+        if len(member_ids) >= 2:
+            skipped.append(channel.name)
+            continue
+        await db.execute(channel_members.insert().values(channel_id=channel.id, user_id=target.id))
+        joined.append(channel.name)
 
     await audit(
         db,
         event="server.member_added",
         actor_id=user.id,
         request=request,
-        detail=f"{server.id}:{target.username}",
+        detail=f"{server.id}:{target.username};joined={len(joined)};skipped={len(skipped)}",
     )
     await db.commit()
-    return {"server_id": server.id, "username": target.username, "added": True}
+    return {
+        "server_id": server.id,
+        "username": target.username,
+        "added": True,
+        "joined_channels": joined,
+        "skipped_channels": skipped,
+        "note": (
+            "channels already holding two members were skipped; create a new channel to "
+            "start an encrypted session with this member"
+        )
+        if skipped
+        else None,
+    }

@@ -1,0 +1,6 @@
+# Test-only dependencies for the bridge end-to-end suite.
+#
+# The suite boots the real FastAPI application on a loopback port, so it needs
+# the backend's runtime dependencies as well as the bridge's own.
+-r requirements.txt
+-r ../backend/requirements.txt

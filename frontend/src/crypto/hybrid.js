@@ -5,9 +5,21 @@ import { base64ToBytes, bytesToBase64, concatBytes, encoder } from "./bytes.js";
 const KDF_LABEL = encoder.encode("prahari/hybrid-kem/v1/aes256gcm");
 const ZERO_SALT = new Uint8Array(32);
 
+// The raw handshake transcript is 2336 bytes because ML-KEM-768 keys and ciphertexts are
+// large. OpenSSL-backed HKDF implementations (Node, Deno, Bun, and any embedded/FPGA-side
+// reimplementation) reject an `info` longer than 1024 bytes, so hash the transcript to 32
+// bytes first. Same binding, portable to every runtime we need to target.
+export async function transcriptDigest(responderX, responderKem, ephemeralX, kemCiphertext) {
+  const transcript = concatBytes(KDF_LABEL, responderX, responderKem, ephemeralX, kemCiphertext);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", transcript));
+}
+
 async function deriveKey(xSecret, kemSecret, responderX, responderKem, ephemeralX, kemCiphertext) {
   const ikm = concatBytes(xSecret, kemSecret);
-  const info = concatBytes(KDF_LABEL, responderX, responderKem, ephemeralX, kemCiphertext);
+  const info = concatBytes(
+    KDF_LABEL,
+    await transcriptDigest(responderX, responderKem, ephemeralX, kemCiphertext),
+  );
   const keyMaterial = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
     { name: "HKDF", hash: "SHA-256", salt: ZERO_SALT, info },

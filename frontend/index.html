@@ -1,13 +1,27 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#05070b" />
-    <title>PRAHARI</title>
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0b0f12" />
+    <meta
+      name="description"
+      content="PRAHARI — hybrid post-quantum end-to-end encrypted messaging and UAV command-and-control."
+    />
+    <title>PRAHARI · Secure Communications</title>
+    <script>
+      // Apply the stored theme before first paint so the console never flashes
+      // the wrong surface colour on load.
+      try {
+        const stored = localStorage.getItem("prahari_theme");
+        if (stored) document.documentElement.dataset.theme = stored;
+      } catch {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>PRAHARI performs all encryption in the browser and requires JavaScript.</noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

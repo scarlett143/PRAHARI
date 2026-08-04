@@ -53,17 +53,6 @@ async def create_offer(
     if not expected_responder.key_verified:
         raise HTTPException(409, "responder has no verified key bundle")
 
-    existing = (
-        await db.execute(
-            select(SessionOffer).where(
-                SessionOffer.channel_id == channel.id,
-                SessionOffer.key_epoch == channel.key_epoch,
-            )
-        )
-    ).scalars().first()
-    if existing:
-        return _serialize(existing)
-
     ephemeral_public = b64d(
         body.x25519_ephemeral_public, expect=32, field="x25519_ephemeral_public"
     )
@@ -71,6 +60,11 @@ async def create_offer(
         body.ml_kem_ciphertext, expect=pqc.CT_BYTES, field="ml_kem_ciphertext"
     )
     offer_signature = b64d(body.offer_signature, expect=64, field="offer_signature")
+
+    existing = await _load_offer(db, channel.id, channel.key_epoch)
+    if existing:
+        return _existing_or_conflict(existing, ephemeral_public, kem_ciphertext)
+
     signed_payload = security.session_offer_signing_payload(
         channel_id=channel.id,
         key_epoch=channel.key_epoch,
@@ -106,16 +100,9 @@ async def create_offer(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        existing = (
-            await db.execute(
-                select(SessionOffer).where(
-                    SessionOffer.channel_id == channel.id,
-                    SessionOffer.key_epoch == channel.key_epoch,
-                )
-            )
-        ).scalars().first()
+        existing = await _load_offer(db, channel.id, channel.key_epoch)
         if existing:
-            return _serialize(existing)
+            return _existing_or_conflict(existing, ephemeral_public, kem_ciphertext)
         raise
     await db.refresh(offer)
     await manager.notify_users(
@@ -145,6 +132,46 @@ async def get_offer(
     if offer is None:
         raise HTTPException(404, "session offer not found")
     return _serialize(offer)
+
+
+async def _load_offer(db: AsyncSession, channel_id: str, key_epoch: int) -> SessionOffer | None:
+    return (
+        await db.execute(
+            select(SessionOffer).where(
+                SessionOffer.channel_id == channel_id,
+                SessionOffer.key_epoch == key_epoch,
+            )
+        )
+    ).scalars().first()
+
+
+def _existing_or_conflict(
+    existing: SessionOffer, ephemeral_public: bytes, kem_ciphertext: bytes
+) -> dict:
+    """Return the stored offer only when it is byte-identical to the submitted one.
+
+    An epoch has exactly one offer. Silently handing back a *different* stored offer
+    would leave the initiator holding a session key derived from its own fresh
+    ephemeral that no peer can reproduce, so every later message would fail
+    authentication with no visible cause. Reject instead and make the client rotate.
+    """
+    if (
+        existing.x25519_ephemeral_public == ephemeral_public
+        and existing.ml_kem_ciphertext == kem_ciphertext
+    ):
+        return _serialize(existing)
+    raise HTTPException(
+        409,
+        detail={
+            "code": "session_offer_exists",
+            "message": (
+                "a different hybrid session offer is already published for this epoch; "
+                "rotate the channel to the next epoch to establish a new session"
+            ),
+            "channel_id": existing.channel_id,
+            "key_epoch": existing.key_epoch,
+        },
+    )
 
 
 def _serialize(offer: SessionOffer) -> dict:
