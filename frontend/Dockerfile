@@ -6,7 +6,12 @@ FROM node:22-alpine AS build
 WORKDIR /app
 
 # Vite inlines the API base URL at build time, so it has to be a build arg.
-ARG VITE_API_URL=http://localhost:8000
+#
+# Empty by default, meaning same-origin: nginx in this image proxies /api and /ws to the
+# backend, so the bundle carries no API hostname and the same image runs unchanged behind
+# localhost, a tunnel, or a real domain. Baking in a host here would pin the image to one
+# deployment and, worse, would silently point visitors' browsers at their own machine.
+ARG VITE_API_URL=
 ENV VITE_API_URL=$VITE_API_URL
 
 COPY package.json package-lock.json* ./

@@ -56,9 +56,11 @@ services:
     build:
       context: ./frontend
       args:
-        # Baked into the bundle at build time. Point this at the API URL that
-        # BROWSERS will use -- not an internal compose hostname.
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        # Empty by default: nginx serves /api and /ws from this same origin, so the
+        # bundle carries no API hostname and the image runs unchanged behind localhost,
+        # a tunnel, or a real domain. Set this only if the API lives on another origin,
+        # and then point it at the URL BROWSERS use -- never an internal compose name.
+        VITE_API_URL: ${VITE_API_URL:-}
     restart: unless-stopped
     ports:
       - "5173:5173"

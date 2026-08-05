@@ -1,8 +1,17 @@
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+/**
+ * Empty (the default) means same-origin: the page's own host serves `/api` and `/ws`
+ * through a reverse proxy. That is what lets one build run unchanged behind localhost, a
+ * tunnel, or a real domain -- nothing about where the API lives is baked into the bundle,
+ * and the browser never makes a cross-origin request, so there is no CORS to satisfy.
+ *
+ * Set VITE_API_URL only when the API genuinely lives on another origin.
+ */
+const API_URL = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
 const TOKEN_KEY = "prahari_token";
 
+/** Absolute base for building WebSocket URLs, which cannot be relative. */
 export function getApiUrl() {
-  return API_URL;
+  return API_URL || window.location.origin;
 }
 
 export function getToken() {
