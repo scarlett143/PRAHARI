@@ -11,6 +11,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 INSECURE_PLACEHOLDERS = {"", "secret", "changeme", "supersecretkey", "your_private_key_here"}
 
+#: 32 characters is roughly the shortest a token_urlsafe secret can be while still
+#: carrying enough entropy to be worth the name. Anything shorter in production is
+#: refused outright rather than warned about.
+MIN_JWT_SECRET_LENGTH = 32
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -65,17 +70,42 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     def validate_for_runtime(self) -> None:
-        if self.jwt_secret.strip().lower() in INSECURE_PLACEHOLDERS:
+        secret = self.jwt_secret.strip()
+        if secret.lower() in INSECURE_PLACEHOLDERS:
             if self.is_production:
                 raise RuntimeError("JWT_SECRET must be set to a strong random value in production")
             self.jwt_secret = secrets.token_urlsafe(48)
             print("[config] JWT_SECRET unset; using an ephemeral development secret.", file=sys.stderr)
-
-        if self.is_production and self.pqc_backend != "liboqs":
-            print(
-                "[config] WARNING: kyber-py is not constant-time; use liboqs for deployment.",
-                file=sys.stderr,
+        elif self.is_production and len(secret) < MIN_JWT_SECRET_LENGTH:
+            # The placeholder list only catches secrets someone copied from the docs. A
+            # short one they invented themselves is just as forgeable, and every session
+            # token in the system rests on it.
+            raise RuntimeError(
+                f"JWT_SECRET must be at least {MIN_JWT_SECRET_LENGTH} characters in "
+                "production; generate one with "
+                "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
             )
+
+        if self.is_production:
+            # Previously a warning on stderr, which is exactly where a deployment note
+            # goes to be ignored. The pure-Python ML-KEM is documented as research grade
+            # and not constant-time, so in production this is a refusal, not advice.
+            if self.pqc_backend != "liboqs":
+                raise RuntimeError(
+                    f"PQC_BACKEND={self.pqc_backend!r} is not constant-time and must not "
+                    "be used in production. Set PQC_BACKEND=liboqs (see "
+                    "requirements-hardened.txt), or set ENVIRONMENT=development if this "
+                    "is a demo."
+                )
+            # Fail at startup rather than at the first handshake: a backend that cannot
+            # import should stop a deploy, not surface as a runtime error for one user.
+            from .crypto import pqc
+
+            try:
+                backend = pqc.get_backend()
+            except pqc.PQCError as exc:
+                raise RuntimeError(f"PQC_BACKEND=liboqs selected but unusable: {exc}") from exc
+            print(f"[config] PQC backend: {backend.name}", file=sys.stderr)
 
 
 @lru_cache

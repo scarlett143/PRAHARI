@@ -24,6 +24,8 @@ FROM nginx:1.27-alpine AS runtime
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Included by the server block and by every location that sets its own add_header.
+COPY security-headers.conf /etc/nginx/security-headers.conf
 
 EXPOSE 5173
 

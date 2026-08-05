@@ -28,6 +28,9 @@ services:
       args:
         INSTALL_QUANTUM: ${INSTALL_QUANTUM:-0}
         INSTALL_BLOCKCHAIN: ${INSTALL_BLOCKCHAIN:-0}
+        # Set to 1 together with ENVIRONMENT=production; the app refuses to start in
+        # production without the constant-time backend this installs.
+        INSTALL_LIBOQS: ${INSTALL_LIBOQS:-0}
     restart: unless-stopped
     env_file:
       - .env
