@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { linkApi, workspaceApi } from "../lib/api.js";
-import { decryptMessage, encryptMessage } from "../crypto/aead.js";
-import { ensureSession, getStoredSessionKey } from "../crypto/session.js";
+import { decryptWithRatchet, encryptWithRatchet, openRatchet } from "../crypto/ratchetSession.js";
+import { loadPlaintexts, savePlaintext } from "../storage/keys.js";
 import { Alert, Badge, EmptyState, Field, Panel } from "../components/ui.jsx";
 import Linkify, { LinkCard, extractLinks } from "../components/Linkify.jsx";
 import { InvitePanel, LinkRequests, PeerDirectory } from "../components/DirectoryPanel.jsx";
@@ -69,22 +69,30 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
     }
   }, []);
 
-  /** Decrypt one envelope against the session key for its epoch. */
+  /**
+   * Decrypt one envelope, or return what was already decrypted.
+   *
+   * A ratchet message key is destroyed once used, so the same envelope can never be
+   * decrypted twice. The locally stored plaintext is therefore the only copy after the
+   * first read -- consulting it first is what makes reopening a channel work at all.
+   */
   const decode = useCallback(
-    async (message, target) => {
+    async (message, target, cache) => {
+      const known = cache?.get(message.id);
+      if (known) {
+        return { ...message, plaintext: known.plaintext, authenticated: known.authenticated };
+      }
       try {
-        let key = await getStoredSessionKey(target.id, message.key_epoch);
-        if (!key && message.key_epoch === target.key_epoch) {
-          key = await ensureSession(target, user, identity, message.key_epoch);
-        }
-        if (!key) throw new Error("No session key held for this epoch");
-        const plaintext = await decryptMessage(key, message.envelope_b64, {
-          senderId: message.sender_id,
-          channelId: target.id,
-          epoch: message.key_epoch,
+        const plaintext = await decryptWithRatchet(target, user, identity, message);
+        await savePlaintext(target.id, message.id, {
+          messageId: message.id,
+          plaintext,
+          authenticated: true,
         });
         return { ...message, plaintext, authenticated: true };
       } catch (caught) {
+        // Deliberately not cached: a failure here can be transient (the peer has not
+        // published their offer yet), and storing it would make it permanent.
         return { ...message, plaintext: caught.message, authenticated: false };
       }
     },
@@ -94,8 +102,15 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
   const loadMessages = useCallback(
     async (target) => {
       if (!target) return;
-      const rows = await workspaceApi.messages(target.id);
-      setMessages(await Promise.all(rows.map((row) => decode(row, target))));
+      const [rows, cache] = await Promise.all([
+        workspaceApi.messages(target.id),
+        loadPlaintexts(target.id),
+      ]);
+      // Strictly sequential: the ratchet is a state machine, so decrypting concurrently
+      // would interleave chain advances and corrupt it.
+      const decoded = [];
+      for (const row of rows) decoded.push(await decode(row, target, cache));
+      setMessages(decoded);
     },
     [decode],
   );
@@ -108,11 +123,8 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
       setTypingPeers({});
       setSessionStatus({ tone: "neutral", text: "Establishing hybrid session…" });
       try {
-        await ensureSession(details, user, identity);
-        setSessionStatus({
-          tone: "good",
-          text: `Session established · epoch ${details.key_epoch}`,
-        });
+        await openRatchet(details, user, identity);
+        setSessionStatus({ tone: "good", text: "Ratcheting · per-message keys" });
       } catch (caught) {
         setSessionStatus({ tone: "warning", text: caught.message });
       }
@@ -165,11 +177,17 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
         const incoming = socketEvent.message;
         // Append rather than refetch: the envelope is already in the frame, so the
         // message renders without a round trip and without re-running the handshake.
-        decode(incoming, current).then((decoded) => {
-          setMessages((prev) =>
-            prev.some((item) => item.id === decoded.id) ? prev : [...prev, decoded],
-          );
-        });
+        //
+        // Our own messages are skipped here: `send` already recorded the plaintext, and
+        // running the echo through the ratchet would consume a receiving-chain key that
+        // belongs to a message from the peer.
+        if (incoming.sender_id !== user.id) {
+          decode(incoming, current).then((decoded) => {
+            setMessages((prev) =>
+              prev.some((item) => item.id === decoded.id) ? prev : [...prev, decoded],
+            );
+          });
+        }
         setTypingPeers((prev) => {
           const next = { ...prev };
           delete next[incoming.sender_id];
@@ -323,12 +341,7 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
     typingSentAt.current = 0;
     signalTyping("stop");
     try {
-      const key = await ensureSession(channel, user, identity);
-      const envelope = await encryptMessage(key, text, {
-        senderId: user.id,
-        channelId: channel.id,
-        epoch: channel.key_epoch,
-      });
+      const envelope = await encryptWithRatchet(channel, user, identity, text);
       const created = await workspaceApi.send({
         client_message_id: crypto.randomUUID(),
         channel_id: channel.id,
@@ -336,6 +349,13 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
         envelope_b64: envelope,
       });
       setDraft("");
+      // Our own plaintext is stored, not re-derived: the sending key is gone the instant
+      // it is used, so this is the only copy this device will ever have.
+      await savePlaintext(channel.id, created.id, {
+        messageId: created.id,
+        plaintext: text,
+        authenticated: true,
+      });
       // Render our own message immediately; the echoed socket frame is de-duplicated by
       // id, so this is not a race with the fan-out.
       setMessages((prev) =>
