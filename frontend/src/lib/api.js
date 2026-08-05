@@ -88,6 +88,36 @@ export const workspaceApi = {
     api(`/api/v2/channels/${channelId}/messages?limit=${limit}`),
   send: (body) => post("/api/v2/messages", body),
   searchUsers: (query) => api(`/api/v2/users?query=${encodeURIComponent(query)}`),
+  presence: () => api("/api/v2/users/presence"),
+  acknowledge: (channelId, messageIds, state) =>
+    post("/api/v2/messages/receipts", {
+      channel_id: channelId,
+      message_ids: messageIds,
+      state,
+    }),
+};
+
+/* -- invite links ----------------------------------------------------------- */
+
+const del = (path) => api(path, { method: "DELETE" });
+
+export const inviteApi = {
+  create: (body) => post("/api/v2/invites", body),
+  list: (serverId) => api(`/api/v2/servers/${serverId}/invites`),
+  revoke: (inviteId) => del(`/api/v2/invites/${inviteId}`),
+  // Unauthenticated on purpose: the join screen has to render before sign-in.
+  preview: (code) => api(`/api/v2/invites/${encodeURIComponent(code)}/preview`),
+  accept: (code) => post(`/api/v2/invites/${encodeURIComponent(code)}/accept`),
+};
+
+/* -- direct peer links ------------------------------------------------------ */
+
+export const linkApi = {
+  request: (username, note) => post("/api/v2/links", { username, note: note || null }),
+  list: () => api("/api/v2/links"),
+  accept: (linkId) => post(`/api/v2/links/${linkId}/accept`),
+  decline: (linkId) => post(`/api/v2/links/${linkId}/decline`),
+  cancel: (linkId) => del(`/api/v2/links/${linkId}`),
 };
 
 /* -- fleet ------------------------------------------------------------------ */

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getApiUrl, getToken } from "./api.js";
 
 /**
@@ -78,5 +78,21 @@ export function useRealtime(enabled) {
     };
   }, [enabled]);
 
-  return { event, status };
+  /**
+   * Fire-and-forget outbound frame. Typing notices are advisory: if the link is
+   * down there is nothing worth queueing, because a notice that arrives after the
+   * message it was announcing is noise.
+   */
+  const send = useCallback((frame) => {
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    try {
+      socket.send(JSON.stringify(frame));
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  return { event, status, send };
 }

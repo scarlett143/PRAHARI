@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -12,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..database import get_db
-from ..models import Message, User
+from ..models import Message, MessageReceipt, User
 from ..realtime import manager
 from ..security import CurrentUser
 from .common import audit, b64d, b64e, channel_member_users, require_channel_member
@@ -108,6 +110,118 @@ async def send_message(
     return payload
 
 
+class ReceiptRequest(BaseModel):
+    channel_id: str
+    message_ids: list[str] = Field(min_length=1, max_length=200)
+    state: Literal["delivered", "read"]
+
+
+@router.post("/messages/receipts")
+async def acknowledge_messages(
+    body: ReceiptRequest,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Record that a recipient received or displayed messages.
+
+    Metadata only, and only ever about someone else's messages -- acknowledging your own
+    would let a client fabricate the receipt its peer is meant to produce.
+    """
+    channel = await require_channel_member(db, body.channel_id, user)
+    rows = (
+        await db.execute(
+            select(Message.id, Message.sender_id).where(
+                Message.id.in_(body.message_ids),
+                Message.channel_id == channel.id,
+                Message.sender_id != user.id,
+            )
+        )
+    ).all()
+    if not rows:
+        return {"updated": 0, "state": body.state}
+
+    now = datetime.now(timezone.utc)
+    existing = {
+        receipt.message_id: receipt
+        for receipt in (
+            await db.execute(
+                select(MessageReceipt).where(
+                    MessageReceipt.user_id == user.id,
+                    MessageReceipt.message_id.in_([row[0] for row in rows]),
+                )
+            )
+        ).scalars().all()
+    }
+
+    by_sender: dict[str, list[dict]] = defaultdict(list)
+    updated = 0
+    for message_id, sender_id in rows:
+        receipt = existing.get(message_id)
+        if receipt is None:
+            receipt = MessageReceipt(
+                message_id=message_id, user_id=user.id, channel_id=channel.id
+            )
+            db.add(receipt)
+        # Reading implies delivery, and neither timestamp is ever moved backwards: a
+        # late-arriving "delivered" from a second tab must not undo a read.
+        if receipt.delivered_at is None:
+            receipt.delivered_at = now
+            updated += 1
+        if body.state == "read" and receipt.read_at is None:
+            receipt.read_at = now
+            updated += 1
+        by_sender[sender_id].append(
+            {
+                "message_id": message_id,
+                "delivered_at": receipt.delivered_at,
+                "read_at": receipt.read_at,
+            }
+        )
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two tabs acknowledging the same message at once is normal, not an error.
+        await db.rollback()
+        return {"updated": 0, "state": body.state}
+
+    for sender_id, receipts in by_sender.items():
+        await manager.notify_users(
+            [sender_id],
+            {
+                "type": "message.receipts",
+                "channel_id": channel.id,
+                "by": user.id,
+                "by_username": user.username,
+                "receipts": jsonable_encoder(receipts),
+            },
+        )
+    return {"updated": updated, "state": body.state}
+
+
+async def _receipts_for(db: AsyncSession, channel_id: str, sender_id: str) -> dict[str, dict]:
+    """Receipt state on `sender_id`'s messages, keyed by message id.
+
+    A channel is two-party, so at most one peer receipt exists per message and the
+    collapsed shape below is exact rather than a summary.
+    """
+    rows = (
+        await db.execute(
+            select(MessageReceipt)
+            .join(Message, Message.id == MessageReceipt.message_id)
+            .where(
+                MessageReceipt.channel_id == channel_id,
+                Message.sender_id == sender_id,
+                MessageReceipt.user_id != sender_id,
+            )
+        )
+    ).scalars().all()
+    return {
+        row.message_id: {"delivered_at": row.delivered_at, "read_at": row.read_at}
+        for row in rows
+    }
+
+
 @router.get("/channels/{channel_id}/messages")
 async def list_messages(
     channel_id: str,
@@ -125,7 +239,11 @@ async def list_messages(
             .limit(min(max(limit, 1), 500))
         )
     ).all()
-    return [_serialize(message, username) for message, username in reversed(rows)]
+    receipts = await _receipts_for(db, channel_id, user.id)
+    return [
+        {**_serialize(message, username), "receipt": receipts.get(message.id)}
+        for message, username in reversed(rows)
+    ]
 
 
 def _serialize(message: Message, username: str) -> dict:

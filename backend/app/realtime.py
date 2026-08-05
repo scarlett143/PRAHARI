@@ -7,10 +7,12 @@ dead socket cannot stall delivery to everyone behind it.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import defaultdict
 
 from fastapi import WebSocket
+from fastapi.encoders import jsonable_encoder
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +40,19 @@ class ConnectionManager:
     def endpoint_count(self) -> int:
         return len(self._connections)
 
-    async def connect(self, user_id: str, websocket: WebSocket) -> None:
+    def is_online(self, user_id: str) -> bool:
+        return bool(self._connections.get(user_id))
+
+    def online_users(self) -> set[str]:
+        return {user_id for user_id, sockets in self._connections.items() if sockets}
+
+    async def connect(self, user_id: str, websocket: WebSocket) -> bool:
+        """Register a socket. Returns True when this user just came online.
+
+        A user may hold several sockets at once (two browser tabs, a phone). Presence
+        must flip on the *first* and off the *last*, never once per tab, or peers see a
+        stream of spurious online/offline churn.
+        """
         async with self._lock:
             if self.max_connections and self._count >= self.max_connections:
                 raise ConnectionLimitReached(
@@ -52,16 +66,22 @@ class ConnectionManager:
                 self._count = max(0, self._count - 1)
             raise
         async with self._lock:
+            was_offline = not self._connections.get(user_id)
             self._connections[user_id].add(websocket)
+            return was_offline
 
-    async def disconnect(self, user_id: str, websocket: WebSocket) -> None:
+    async def disconnect(self, user_id: str, websocket: WebSocket) -> bool:
+        """Drop a socket. Returns True when this user just went offline."""
         async with self._lock:
             sockets = self._connections.get(user_id)
-            if sockets and websocket in sockets:
-                sockets.discard(websocket)
-                self._count = max(0, self._count - 1)
-                if not sockets:
-                    self._connections.pop(user_id, None)
+            if not sockets or websocket not in sockets:
+                return False
+            sockets.discard(websocket)
+            self._count = max(0, self._count - 1)
+            if not sockets:
+                self._connections.pop(user_id, None)
+                return True
+            return False
 
     async def notify_users(self, user_ids: list[str], payload: dict) -> int:
         """Deliver a payload to every live socket of the given users.
@@ -69,6 +89,17 @@ class ConnectionManager:
         Returns the number of successful deliveries. Failures are pruned rather than
         raised: a dropped link is normal operation, not an error for the caller.
         """
+        # Encode once, before any socket is touched.
+        #
+        # This is deliberately outside the per-socket try/except. A payload that cannot be
+        # serialised -- a stray datetime, say -- is a programming error, and if it were
+        # allowed to raise inside `deliver` it would be indistinguishable from a dead
+        # peer: every recipient would be quietly pruned as unreachable and the caller
+        # would still see a successful request. Encoding up front turns that into a loud
+        # failure at the source, and sending the same pre-rendered frame to every socket
+        # is cheaper than re-serialising per connection during a fleet-wide fan-out.
+        frame = json.dumps(jsonable_encoder(payload))
+
         async with self._lock:
             targets = [
                 (uid, ws)
@@ -81,7 +112,7 @@ class ConnectionManager:
         async def deliver(websocket: WebSocket) -> bool:
             try:
                 await asyncio.wait_for(
-                    websocket.send_json(payload), timeout=SEND_TIMEOUT_SECONDS
+                    websocket.send_text(frame), timeout=SEND_TIMEOUT_SECONDS
                 )
                 return True
             except Exception:

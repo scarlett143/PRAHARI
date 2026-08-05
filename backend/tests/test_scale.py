@@ -119,7 +119,9 @@ async def test_fanout_to_a_thousand_sockets_is_concurrent_and_prunes_dead_links(
             self.delay = delay
             self.received = 0
 
-        async def send_json(self, _payload):
+        # The manager renders the payload once and sends the same text to every socket,
+        # so the fan-out cost per connection is a write, not a re-serialisation.
+        async def send_text(self, _frame):
             if self.delay:
                 await asyncio.sleep(self.delay)
             if self.fails:

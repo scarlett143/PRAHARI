@@ -4,6 +4,7 @@ import { useRealtime } from "./lib/useRealtime.js";
 import { loadIdentity } from "./storage/keys.js";
 import { Badge, Mark, Spinner } from "./components/ui.jsx";
 import AuthRoute from "./routes/AuthRoute.jsx";
+import JoinRoute from "./routes/JoinRoute.jsx";
 import MessagingRoute from "./routes/MessagingRoute.jsx";
 import FleetRoute from "./routes/FleetRoute.jsx";
 import LinkConsoleRoute from "./routes/LinkConsoleRoute.jsx";
@@ -21,13 +22,29 @@ const VIEWS = [
 
 const THEME_KEY = "prahari_theme";
 
+/** `/join/<code>` is the only path the app serves besides the console itself. */
+function readInviteCode() {
+  const match = window.location.pathname.match(/^\/join\/([A-Za-z0-9_-]{8,64})\/?$/);
+  return match ? match[1] : "";
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [identity, setIdentity] = useState(null);
   const [view, setView] = useState("messaging");
   const [consoleTarget, setConsoleTarget] = useState(null);
   const [checking, setChecking] = useState(true);
+  const [inviteCode, setInviteCode] = useState(readInviteCode);
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "dark");
+
+  /** Clear the invite from state and the address bar together, so a reload does not
+   *  drop the operator back onto a code they already redeemed. */
+  const dismissInvite = useCallback(() => {
+    setInviteCode("");
+    if (window.location.pathname !== "/") {
+      window.history.replaceState({}, "", "/");
+    }
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -51,7 +68,11 @@ export default function App() {
       .finally(() => setChecking(false));
   }, [acceptUser]);
 
-  const { event: socketEvent, status: socketStatus } = useRealtime(Boolean(user));
+  const {
+    event: socketEvent,
+    status: socketStatus,
+    send: socketSend,
+  } = useRealtime(Boolean(user));
 
   function signOut() {
     setToken("");
@@ -62,6 +83,18 @@ export default function App() {
   }
 
   if (checking) return <Spinner label="Checking secure session…" />;
+  // The invite screen renders before authentication so an invitee can see what they were
+  // sent without having to register on faith first.
+  if (inviteCode) {
+    return (
+      <JoinRoute
+        code={inviteCode}
+        user={user}
+        onDismiss={dismissInvite}
+        onJoined={() => authApi.me().then(acceptUser).catch(() => {})}
+      />
+    );
+  }
   if (!user) return <AuthRoute onAuthenticated={acceptUser} />;
 
   const active = consoleTarget
@@ -152,7 +185,12 @@ export default function App() {
               onBack={() => setConsoleTarget(null)}
             />
           ) : view === "messaging" ? (
-            <MessagingRoute user={user} identity={identity} socketEvent={socketEvent} />
+            <MessagingRoute
+              user={user}
+              identity={identity}
+              socketEvent={socketEvent}
+              socketSend={socketSend}
+            />
           ) : view === "fleet" ? (
             <FleetRoute onOpenConsole={setConsoleTarget} />
           ) : view === "proofs" ? (

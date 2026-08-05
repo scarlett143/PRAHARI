@@ -15,6 +15,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -186,6 +187,92 @@ class Message(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     channel = relationship("Channel", back_populates="messages")
+
+
+class Invite(Base):
+    """A shareable link that admits one or more peers to a workspace.
+
+    Only the SHA-256 of the code is stored, following the same rule as
+    `UavProfile.enrollment_token_hash`: a database disclosure must not hand an attacker a
+    working invite. The plaintext code is returned exactly once, at creation. Listing an
+    invite afterwards shows its usage and expiry but never the code -- if the creator
+    loses it they mint a new one.
+
+    An invite grants *membership*, never key material. Someone who redeems a stolen code
+    joins the workspace but still cannot read any message: plaintext requires the
+    two-party hybrid handshake against a published, signed key bundle.
+    """
+
+    __tablename__ = "invites"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    code_hash = Column(String(64), unique=True, nullable=False, index=True)
+    #: Non-secret leading characters, so the creator can tell two live invites apart.
+    code_hint = Column(String(8), nullable=False)
+    server_id = Column(String, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    label = Column(String(96), nullable=True)
+    max_uses = Column(Integer, nullable=False, default=1)
+    use_count = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class LinkRequest(Base):
+    """A request from one operator to open an encrypted link with another.
+
+    Deliberately two-sided: the target must accept before a channel exists. Nobody can
+    force a session onto a peer who has not agreed to it, which keeps the consent model
+    the same as the aircraft link, where enrolment is an explicit act.
+    """
+
+    __tablename__ = "link_requests"
+    __table_args__ = (
+        # At most one live request per direction. Settled rows are free to accumulate as
+        # history, so the constraint covers only the pending state.
+        Index(
+            "uq_link_request_pending",
+            "requester_id",
+            "target_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id = Column(String, primary_key=True, default=_uuid)
+    requester_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    note = Column(String(200), nullable=True)
+    #: Set when accepted: the two-party channel opened for this pair.
+    channel_id = Column(String, ForeignKey("channels.id", ondelete="SET NULL"), nullable=True)
+    server_id = Column(String, ForeignKey("servers.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class MessageReceipt(Base):
+    """Per-recipient delivery and read state.
+
+    Metadata only. The server already knows who is in a channel and when a message
+    arrived, so recording that a recipient fetched or displayed it reveals nothing the
+    threat model did not already grant it -- and still nothing about content.
+    """
+
+    __tablename__ = "message_receipts"
+    __table_args__ = (
+        UniqueConstraint("message_id", "user_id", name="uq_receipt_message_user"),
+        Index("ix_receipts_user_message", "user_id", "message_id"),
+    )
+
+    id = Column(String, primary_key=True, default=_uuid)
+    message_id = Column(String, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    channel_id = Column(String, ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    read_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class AuditLog(Base):

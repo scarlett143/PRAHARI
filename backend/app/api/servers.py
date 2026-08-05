@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import Channel, Server, User, channel_members, server_members
+from ..realtime import manager
 from ..security import CurrentUser
 from .common import audit
 
@@ -148,6 +149,26 @@ async def add_member(
         detail=f"{server.id}:{target.username};joined={len(joined)};skipped={len(skipped)}",
     )
     await db.commit()
+
+    # Without this the person being added sees nothing until they happen to reload, which
+    # makes an invitation feel broken. Existing members are told too, so member lists and
+    # presence dots converge without polling.
+    existing_members = (
+        await db.execute(
+            select(server_members.c.user_id).where(server_members.c.server_id == server.id)
+        )
+    ).all()
+    await manager.notify_users(
+        [row[0] for row in existing_members],
+        {
+            "type": "server.member_added",
+            "server_id": server.id,
+            "user_id": target.id,
+            "username": target.username,
+            "joined_channels": joined,
+        },
+    )
+
     return {
         "server_id": server.id,
         "username": target.username,
