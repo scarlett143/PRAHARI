@@ -45,7 +45,16 @@ async def create_offer(
         raise HTTPException(409, "session offer epoch does not match channel epoch")
 
     sorted_members = sorted(members, key=lambda member: member.username.lower())
-    expected_initiator, expected_responder = sorted_members
+    # An explicit initiator on the channel wins over username order. The aircraft link
+    # sets it, because the side that transmits first has to be the side that opens the
+    # ratchet -- a ratchet responder cannot send until it has received. Both this check
+    # and the one in GET /channels/{id} must agree, or a client would be told it is the
+    # initiator and then refused when it published the offer.
+    expected_initiator = next(
+        (member for member in members if member.id == channel.initiator_id),
+        sorted_members[0],
+    )
+    expected_responder = next(member for member in members if member.id != expected_initiator.id)
     if user.id != expected_initiator.id:
         raise HTTPException(409, f"{expected_initiator.username} is the deterministic session initiator")
     if body.responder_id != expected_responder.id:

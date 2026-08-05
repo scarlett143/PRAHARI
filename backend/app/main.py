@@ -24,7 +24,13 @@ from .api import (
 )
 from .config import get_settings
 from .crypto import pqc
-from .database import Base, close_database, get_engine, ping_database
+from .database import (
+    Base,
+    close_database,
+    get_engine,
+    ping_database,
+    reconcile_additive_columns,
+)
 from .realtime import manager
 
 settings = get_settings()
@@ -36,6 +42,9 @@ async def lifespan(_: FastAPI):
     engine = get_engine()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    # create_all adds tables but never columns, so an upgraded deployment needs this or
+    # a new column is missing until someone drops the volume.
+    await reconcile_additive_columns()
     await ping_database()
     yield
     await close_database()

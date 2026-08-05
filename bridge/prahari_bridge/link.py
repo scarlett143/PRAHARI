@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 
 from .api import ApiError, PrahariClient, b64d, b64e
-from .crypto import aead, hybrid, identity as identity_proto
+from .crypto import aead, hybrid, identity as identity_proto, ratchet
 from .keystore import Identity
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,11 @@ class SecureLink:
         self.user_id = user_id
         self.channel_id = channel_id
         self._session: SessionState | None = None
+        self._ratchet: ratchet.RatchetState | None = None
+        self._role: str | None = None
+        #: The peer's published X25519 key, captured during the handshake. It bootstraps
+        #: the ratchet on the initiating side, exactly as the browser does.
+        self._peer_x25519_public: bytes | None = None
 
     # -- session establishment -------------------------------------------------
 
@@ -63,6 +68,9 @@ class SecureLink:
 
     def _verify_peer_bundle(self, bundle: dict) -> hybrid.HybridPublicBundle:
         x_public = b64d(bundle["x25519_public_key"])
+        # Kept for the ratchet bootstrap: the initiating side ratchets against the
+        # responder's published X25519 key, so it must be the verified one.
+        self._peer_x25519_public = x_public
         kem_public = b64d(bundle["ml_kem_encapsulation_key"])
         payload = identity_proto.bundle_signing_payload(
             x25519_public_key=x_public, ml_kem_encapsulation_key=kem_public
@@ -172,6 +180,7 @@ class SecureLink:
         else:
             key = self._as_responder(channel, peer)
             role = "responder"
+        self._role = role
 
         log.info(
             "hybrid session established as %s for channel %s epoch %s",
@@ -184,13 +193,57 @@ class SecureLink:
 
     # -- framing ---------------------------------------------------------------
 
+    def _ensure_ratchet(self) -> ratchet.RatchetState:
+        """Bootstrap the ratchet from the hybrid session, once per link.
+
+        The aircraft runs the same ratchet the console runs -- that is the whole point of
+        porting it here. Without this the drone link would be the one path in the system
+        still using a single key for a whole epoch, which is exactly the weaker path the
+        design says does not exist.
+        """
+        if self._ratchet is not None:
+            return self._ratchet
+        session = self.establish()
+        if self._role == "initiator":
+            if self._peer_x25519_public is None:
+                raise LinkError("peer X25519 key unavailable; cannot start the ratchet")
+            self._ratchet = ratchet.init_sender(session.key, self._peer_x25519_public)
+        else:
+            # The responder ratchets from its own published key, because that is what the
+            # initiator derived against.
+            self._ratchet = ratchet.init_receiver(
+                session.key,
+                ratchet.KeyPair(
+                    secret=self.identity.x25519_private,
+                    public=self.identity.x25519_public,
+                ),
+            )
+        log.info("ratchet initialised as %s for channel %s", self._role, self.channel_id)
+        return self._ratchet
+
     def send(self, payload: bytes) -> dict:
         """Encrypt one frame locally and hand the server an opaque envelope."""
         session = self.establish()
-        aad = aead.build_aad(
-            sender_id=self.user_id, channel_id=self.channel_id, epoch=session.key_epoch
-        )
-        envelope = aead.encrypt(session.key, payload, aad).to_wire()
+        try:
+            envelope = ratchet.encrypt(
+                self._ensure_ratchet(),
+                payload,
+                sender_id=self.user_id,
+                channel_id=self.channel_id,
+                epoch=session.key_epoch,
+            )
+        except ratchet.RatchetError as error:
+            if error.code == "no_sending_chain":
+                # Operationally real, not a bug: the responding side has no sending chain
+                # until it has received once. On the aircraft link that means a ground
+                # station cannot issue a command before the first telemetry frame
+                # arrives. Raised as SessionUnavailable so the existing retry path
+                # handles it, since telemetry is typically milliseconds away.
+                raise SessionUnavailable(
+                    "cannot transmit yet: waiting for the first frame from the peer to "
+                    "open the ratchet"
+                ) from None
+            raise
         try:
             return self.client.send_envelope(
                 client_message_id=uuid.uuid4().hex,
@@ -210,10 +263,25 @@ class SecureLink:
             raise
 
     def decrypt(self, envelope_b64: str, *, sender_id: str, epoch: int) -> bytes:
+        raw = b64d(envelope_b64)
+        if not raw:
+            raise LinkError("empty envelope")
+
+        if raw[0] == ratchet.ENVELOPE_VERSION:
+            return ratchet.decrypt(
+                self._ensure_ratchet(),
+                raw,
+                sender_id=sender_id,
+                channel_id=self.channel_id,
+                epoch=epoch,
+            )
+
+        # Pre-ratchet frames stay readable, so an aircraft already in the air does not
+        # lose its link the moment the ground station is upgraded.
         session = self.establish()
         if epoch != session.key_epoch:
             raise LinkError(f"no session key held for epoch {epoch}")
         aad = aead.build_aad(
             sender_id=sender_id, channel_id=self.channel_id, epoch=epoch
         )
-        return aead.decrypt(session.key, aead.Envelope.from_wire(b64d(envelope_b64)), aad)
+        return aead.decrypt(session.key, aead.Envelope.from_wire(raw), aad)

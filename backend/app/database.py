@@ -51,6 +51,44 @@ async def get_db():
             raise
 
 
+#: Columns added to existing tables after the first release.
+#:
+#: `Base.metadata.create_all` creates missing *tables* and nothing else -- it will never
+#: add a column to a table that already exists. New tables therefore appear on upgrade
+#: while new columns silently do not, and the failure surfaces as an
+#: UndefinedColumnError on the first insert, well after the deploy looked successful.
+#:
+#: This is a deliberate stopgap, not a migration system. It only ever adds nullable
+#: columns, never drops, renames or retypes anything, so it cannot destroy data. Alembic
+#: is the right answer as soon as a change needs backfilling or a type change.
+ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("channels", "initiator_id", "VARCHAR"),
+)
+
+
+async def reconcile_additive_columns() -> None:
+    engine = get_engine()
+    async with engine.begin() as connection:
+
+        def inspect_existing(sync_connection):
+            from sqlalchemy import inspect
+
+            inspector = inspect(sync_connection)
+            tables = set(inspector.get_table_names())
+            return {
+                table: {column["name"] for column in inspector.get_columns(table)}
+                for table in tables
+            }
+
+        existing = await connection.run_sync(inspect_existing)
+        for table, column, column_type in ADDITIVE_COLUMNS:
+            if table not in existing or column in existing[table]:
+                continue
+            await connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+            )
+
+
 async def ping_database() -> None:
     async with get_engine().connect() as connection:
         await connection.execute(text("SELECT 1"))

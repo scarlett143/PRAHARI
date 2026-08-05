@@ -465,7 +465,12 @@ async def establish_link_channel(
             server_members.insert().values(server_id=server.id, user_id=account.id)
         )
 
-    channel = Channel(name=f"link-{profile.callsign}", server_id=server.id)
+    # The aircraft opens the ratchet because the aircraft speaks first: telemetry starts
+    # flowing before any command arrives, and a ratchet responder cannot send until it
+    # has received.
+    channel = Channel(
+        name=f"link-{profile.callsign}", server_id=server.id, initiator_id=account.id
+    )
     channel.members.extend([user, account])
     db.add(channel)
     await db.flush()

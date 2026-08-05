@@ -156,8 +156,8 @@ function skipKey(ratchetPublic, messageNumber) {
  * ratchet key until they take their first step -- the same bootstrap X3DH uses with a
  * signed prekey.
  */
-export async function initSender(sharedSecret, remoteRatchetPublic) {
-  const keyPair = x25519.keygen();
+export async function initSender(sharedSecret, remoteRatchetPublic, keygen = x25519.keygen) {
+  const keyPair = keygen();
   const { rootKey, chainKey } = await kdfRootKey(
     sharedSecret,
     dh(keyPair.secretKey, remoteRatchetPublic),
@@ -172,6 +172,9 @@ export async function initSender(sharedSecret, remoteRatchetPublic) {
     received: 0,
     previousChainLength: 0,
     skipped: new Map(),
+    // Test seam. Interop vectors replay a recorded conversation, which is only possible
+    // if the ephemeral keypairs can be supplied rather than generated.
+    keygen,
   };
 }
 
@@ -182,7 +185,7 @@ export async function initSender(sharedSecret, remoteRatchetPublic) {
  * is the key the sender derived against. It holds no chain keys until the first message
  * arrives and triggers a DH ratchet step.
  */
-export function initReceiver(sharedSecret, ownRatchetKeyPair) {
+export function initReceiver(sharedSecret, ownRatchetKeyPair, keygen = x25519.keygen) {
   return {
     rootKey: sharedSecret,
     sendRatchet: ownRatchetKeyPair,
@@ -193,6 +196,7 @@ export function initReceiver(sharedSecret, ownRatchetKeyPair) {
     received: 0,
     previousChainLength: 0,
     skipped: new Map(),
+    keygen,
   };
 }
 
@@ -213,7 +217,7 @@ async function dhRatchet(state, header) {
 
   // A fresh keypair here is what gives break-in recovery: from this step on, an attacker
   // holding the old state no longer has the secret the next root depends on.
-  state.sendRatchet = x25519.keygen();
+  state.sendRatchet = (state.keygen ?? x25519.keygen)();
   const sending = await kdfRootKey(
     state.rootKey,
     dh(state.sendRatchet.secretKey, state.remoteRatchetPublic),
@@ -386,5 +390,8 @@ export function deserializeState(raw) {
     received: raw.received,
     previousChainLength: raw.previousChainLength,
     skipped: new Map(raw.skipped.map(([key, value]) => [key, base64ToBytes(value)])),
+    // Not serialised: a function cannot round-trip through storage, and a restored
+    // state must always generate real keys rather than silently reusing a test seam.
+    keygen: x25519.keygen,
   };
 }

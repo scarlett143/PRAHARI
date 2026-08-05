@@ -140,9 +140,11 @@ def platform(tmp_path, api_url):
         user_id=operator_id,
         channel_id=link["channel_id"],
     )
-    # Members are sorted by username, so "gcs_*" is the deterministic initiator here and
-    # the aircraft is the responder. The ground station therefore has to publish its
-    # signed offer before the aircraft can derive anything -- exactly as in the browser.
+    # The link channel names the aircraft as initiator, because the aircraft speaks first
+    # and a ratchet responder cannot send until it has received. So the aircraft publishes
+    # its signed offer, and only then can the ground station derive anything -- the
+    # reverse of the plain username ordering used for operator-to-operator channels.
+    agent.link.establish()
     gcs_link.establish()
 
     yield {
@@ -201,6 +203,20 @@ def test_uplink_commands_are_decrypted_on_the_aircraft(platform):
     agent, gcs_link = platform["agent"], platform["gcs_link"]
     agent.link.establish()
 
+    # One telemetry frame first, because the ratchet gives the ground station no sending
+    # chain until it has received. This mirrors flight: the aircraft is already streaming
+    # long before an operator issues a command.
+    telemetry = agent.client.list_messages(platform["channel_id"], limit=1)
+    if not telemetry:
+        agent.link.send(b'{"type":"telemetry","seq":0}')
+        telemetry = agent.client.list_messages(platform["channel_id"], limit=50)
+    uplink_seed = [row for row in telemetry if row["sender_id"] != platform["operator_id"]][0]
+    gcs_link.decrypt(
+        uplink_seed["envelope_b64"],
+        sender_id=uplink_seed["sender_id"],
+        epoch=uplink_seed["key_epoch"],
+    )
+
     command = {"type": "command", "command": "SET_MODE", "mode": "GUIDED"}
     gcs_link.send(json.dumps(command).encode())
 
@@ -236,9 +252,10 @@ def test_epoch_rotation_re_establishes_the_link(platform):
     platform["operator_client"].rotate_epoch(platform["channel_id"])
 
     # The initiator publishes the offer for the new epoch before the responder can
-    # derive anything, same ordering as the initial handshake.
-    rotated = gcs_link.establish(force=True)
+    # derive anything, same ordering as the initial handshake -- and on this channel the
+    # aircraft is the initiator, so it goes first.
     second = agent.link.establish(force=True)
+    rotated = gcs_link.establish(force=True)
 
     assert second.key_epoch == first.key_epoch + 1
     assert second.key != first.key

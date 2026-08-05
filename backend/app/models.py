@@ -95,6 +95,15 @@ class Channel(Base):
     epoch_started_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    #: Which member drives the ratchet. NULL keeps the historical rule -- lowest username
+    #: wins -- which is fine when either side may speak first.
+    #:
+    #: It is not fine for the aircraft link. A Double Ratchet responder cannot send until
+    #: it has received, and an aircraft's first act is to stream telemetry upward, not to
+    #: wait for a command. So the link channel names the aircraft explicitly: the side
+    #: that transmits first has to be the side that opens the ratchet.
+    initiator_id = Column(String, ForeignKey("users.id"), nullable=True)
+
     server = relationship("Server", back_populates="channels")
     members = relationship("User", secondary=channel_members, back_populates="channels")
     messages = relationship("Message", back_populates="channel", cascade="all, delete-orphan")

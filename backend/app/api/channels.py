@@ -112,7 +112,11 @@ async def get_channel(
             }
             for member in members
         ],
-        "session_initiator_id": sorted_members[0].id if len(sorted_members) == 2 else None,
+        # An explicit initiator wins: the aircraft link needs the side that transmits
+        # first to drive the ratchet, which username order cannot express.
+        "session_initiator_id": (
+            (channel.initiator_id or sorted_members[0].id) if len(sorted_members) == 2 else None
+        ),
         "hybrid_session_supported": len(sorted_members) == 2,
     }
 

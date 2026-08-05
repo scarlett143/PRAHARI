@@ -44,6 +44,6 @@ def _ensure_backend_importable() -> None:
 
 _ensure_backend_importable()
 
-from app.crypto import aead, hybrid, identity, pqc  # noqa: E402
+from app.crypto import aead, hybrid, identity, pqc, ratchet  # noqa: E402
 
-__all__ = ["aead", "hybrid", "identity", "pqc"]
+__all__ = ["aead", "hybrid", "identity", "pqc", "ratchet"]
