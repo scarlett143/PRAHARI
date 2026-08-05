@@ -11,6 +11,11 @@ Last run: 2026-08-05, macOS 15 (arm64), Python 3.13.5, Node 20.20.2.
   **24 checks passed**, covering invite issue/preview/redeem, direct peer link request and
   consent, push message delivery, typing relay, presence transitions in both directions,
   and read receipts returning to the sender.
+- `docker compose up --build` -> all three services build and report healthy
+  (Docker 29.7.1 / Compose 5.4.0 on Colima). The same 24 end-to-end checks pass against
+  the containerised stack, which exercises the **PostgreSQL/asyncpg** path rather than
+  SQLite, and confirms the `link_requests` partial unique index is created as a real
+  partial index on PostgreSQL.
 
 The API test module contains a real two-user X25519 + ML-KEM-768 agreement, Ed25519-signed
 session offer, AES-256-GCM send/store/retrieve/decrypt round trip, duplicate-message
@@ -36,11 +41,16 @@ The single skip is deliberate: `test_scale.py` gates 1000 full ML-KEM handshakes
 - **Vite 7.0.6 -> 7.3.6**, clearing seven advisories including path traversal and
   arbitrary file read via the dev-server WebSocket.
 
+- **The documented Docker quickstart did not run at all.** The optional `bridge` service
+  declared `PRAHARI_CALLSIGN` with a `:?` required-variable guard. Compose interpolates
+  every service regardless of which profiles are active, so `docker compose up --build`
+  aborted for everyone -- including users who never asked for the bridge -- before a
+  single container was created. The guard is now a plain default; the agent's own
+  argument parser already refuses to start without a callsign, which is where that check
+  belongs.
+
 ## Known environment gaps
 
-- `docker compose up --build` has **not** been executed here: Docker is not installed on
-  this machine. It remains the documented fresh-environment deployment path, and it is
-  exercised by `.github/workflows/ci.yml`, but it is unverified locally.
 - The disconnect-side presence announcement is asserted at the `ConnectionManager` level
   rather than through `TestClient`. Closing a `TestClient` WebSocket races the server's
   disconnect handler, which makes the frame's arrival non-deterministic; the live-server

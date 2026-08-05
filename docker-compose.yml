@@ -78,7 +78,12 @@ services:
     restart: unless-stopped
     environment:
       PRAHARI_API_URL: ${PRAHARI_API_URL:-http://backend:8000}
-      PRAHARI_CALLSIGN: ${PRAHARI_CALLSIGN:?set PRAHARI_CALLSIGN to the provisioned callsign}
+      # Deliberately not `:?` -- Compose interpolates every service regardless of which
+      # profiles are active, so a required-variable guard here fails `docker compose up`
+      # for everyone, including people who never asked for the bridge. The agent's own
+      # argument parser already refuses to start without a callsign, which is the right
+      # place for that check.
+      PRAHARI_CALLSIGN: ${PRAHARI_CALLSIGN:-}
       PRAHARI_ENROLLMENT_TOKEN: ${PRAHARI_ENROLLMENT_TOKEN:-}
       PRAHARI_CHANNEL_ID: ${PRAHARI_CHANNEL_ID:-}
       PRAHARI_SOURCE: ${PRAHARI_SOURCE:-synthetic}
