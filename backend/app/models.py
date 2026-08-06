@@ -66,6 +66,11 @@ class User(Base):
 
     pending_challenge = Column(String, nullable=True)
     challenge_issued_at = Column(DateTime(timezone=True), nullable=True)
+
+    #: TOTP shared secret. Present but not enabled means setup was started and never
+    #: confirmed, which must not be treated as a second factor being in force.
+    totp_secret = Column(String, nullable=True)
+    totp_enabled = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
 

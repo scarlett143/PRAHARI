@@ -66,11 +66,16 @@ async def get_db():
 ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("channels", "initiator_id", "VARCHAR"),
     ("session_offers", "wrapped_group_key", "BINARY"),
+    ("users", "totp_secret", "VARCHAR"),
+    ("users", "totp_enabled", "BOOLEAN"),
 )
 
 _COLUMN_TYPES = {
     "VARCHAR": {"postgresql": "VARCHAR", "sqlite": "VARCHAR"},
     "BINARY": {"postgresql": "BYTEA", "sqlite": "BLOB"},
+    # Added NOT NULL would fail on a table with rows, so it arrives nullable with a
+    # default and the model treats NULL as "off".
+    "BOOLEAN": {"postgresql": "BOOLEAN DEFAULT FALSE", "sqlite": "BOOLEAN DEFAULT 0"},
 }
 
 

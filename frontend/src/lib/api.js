@@ -64,6 +64,13 @@ export async function api(path, options = {}) {
   }
 
   if (!response.ok) {
+    // A 401 while holding a token means the session is gone -- expired, or signed out
+    // from another device. Without this the app sits there throwing errors at every
+    // panel; the session simply ends, which is what actually happened.
+    if (response.status === 401 && token) {
+      setToken("");
+      window.dispatchEvent(new CustomEvent("prahari:session-ended"));
+    }
     throw new ApiError(response.status, body?.detail ?? body ?? `HTTP ${response.status}`);
   }
   return body;
@@ -89,6 +96,12 @@ export const authApi = {
 
 /* -- sessions ---------------------------------------------------------------
    Where this account is signed in, and how to take any of it away. */
+
+export const twoFactorApi = {
+  setup: () => post("/api/v2/auth/2fa/setup"),
+  enable: (code) => post("/api/v2/auth/2fa/enable", { code }),
+  disable: (password, code) => post("/api/v2/auth/2fa/disable", { password, code }),
+};
 
 export const sessionApi = {
   list: () => api("/api/v2/auth/sessions"),

@@ -35,6 +35,9 @@ export default function AuthRoute({ onAuthenticated }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  // Only asked for once the server says this account has a second factor.
+  const [totpCode, setTotpCode] = useState("");
+  const [totpRequired, setTotpRequired] = useState(false);
 
   const [identities, setIdentities] = useState([]);
   const [health, setHealth] = useState({ state: "checking" });
@@ -83,12 +86,15 @@ export default function AuthRoute({ onAuthenticated }) {
   const blocked =
     busy || !username || !password || Boolean(usernameError) || registerWouldClobber ||
     recoveryImpossible ||
+    (totpRequired && mode === "login" && totpCode.length < 6) ||
     (mode !== "login" && password.length < MIN_PASSWORD_LENGTH);
 
   function switchMode(next) {
     setMode(next);
     setError("");
     setNotice("");
+    setTotpRequired(false);
+    setTotpCode("");
   }
 
   function trackCapsLock(keyboardEvent) {
@@ -157,7 +163,11 @@ export default function AuthRoute({ onAuthenticated }) {
         setToken(auth.access_token);
         await publishBundle(identity);
       } else {
-        const auth = await authApi.login({ username, password });
+        const auth = await authApi.login({
+          username,
+          password,
+          ...(totpCode ? { totp_code: totpCode.trim() } : {}),
+        });
         setToken(auth.access_token);
         if (!auth.key_verified) {
           const record = await loadIdentity(username);
@@ -175,11 +185,19 @@ export default function AuthRoute({ onAuthenticated }) {
       onAuthenticated(await authApi.me());
     } catch (caught) {
       setToken("");
-      setError(
-        caught?.status === 401
-          ? "That username and password do not match an account."
-          : caught.message,
-      );
+      if (caught?.code === "totp_required") {
+        // The password was right; the account simply needs its second factor.
+        setTotpRequired(true);
+        setError("");
+      } else {
+        setError(
+          caught?.code === "totp_invalid"
+            ? "That verification code is not valid. Check your authenticator and try again."
+            : caught?.status === 401
+              ? "That username and password do not match an account."
+              : caught.message,
+        );
+      }
       refreshIdentities();
     } finally {
       setBusy(false);
@@ -349,6 +367,25 @@ export default function AuthRoute({ onAuthenticated }) {
                   : `At least ${MIN_PASSWORD_LENGTH} characters. It authenticates you to the server; your keys stay in this browser either way.`}
               </span>
             </div>
+
+            {totpRequired && mode === "login" && (
+              <div className="field">
+                <label className="field__label" htmlFor="totp">Verification code</label>
+                <input
+                  id="totp"
+                  className="input"
+                  value={totpCode}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  maxLength={6}
+                  onChange={(changeEvent) => setTotpCode(changeEvent.target.value.replace(/\D/g, ""))}
+                />
+                <span className="field__hint">
+                  The 6-digit code from your authenticator app.
+                </span>
+              </div>
+            )}
 
             {capsLock && (
               <Alert tone="warning">Caps Lock is on.</Alert>

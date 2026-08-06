@@ -1,9 +1,168 @@
 import { useEffect, useState } from "react";
-import { opsApi, sessionApi } from "../lib/api.js";
+import { opsApi, sessionApi, twoFactorApi } from "../lib/api.js";
 import { Alert, Badge, Field, Panel } from "../components/ui.jsx";
 import { backupFilename, exportIdentity } from "../crypto/backup.js";
 import { MIN_PASSCODE_LENGTH, isLocked, lockIdentity } from "../crypto/keylock.js";
 import { loadIdentity, replaceIdentityRecord } from "../storage/keys.js";
+
+/**
+ * Two-step verification.
+ *
+ * Setup deliberately runs in two steps: the secret is issued, and only a code proved
+ * against it turns the factor on. Enabling without that check is how people lock
+ * themselves out — a mistyped secret or a badly skewed clock would surface at the next
+ * sign-in, when it is too late to fix from inside the account.
+ */
+function TwoFactorPanel({ user, onChanged }) {
+  const [enabled, setEnabled] = useState(Boolean(user?.totp_enabled));
+  const [setup, setSetup] = useState(null);
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function begin() {
+    setBusy(true);
+    setError("");
+    try {
+      setSetup(await twoFactorApi.setup());
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirm() {
+    setBusy(true);
+    setError("");
+    try {
+      await twoFactorApi.enable(code);
+      setEnabled(true);
+      setSetup(null);
+      setCode("");
+      onChanged?.();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function turnOff() {
+    setBusy(true);
+    setError("");
+    try {
+      await twoFactorApi.disable(password, code);
+      setEnabled(false);
+      setPassword("");
+      setCode("");
+      onChanged?.();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel
+      eyebrow="Access"
+      title="Two-step verification"
+      description="Asks for a code from your authenticator app as well as your password."
+    >
+      <div className="stack" style={{ maxWidth: "34rem" }}>
+        {enabled ? (
+          <Alert tone="good" title="Two-step verification is on">
+            Signing in needs your password and a current code.
+          </Alert>
+        ) : (
+          <Alert tone="warning" title="Your password is the only thing needed to sign in">
+            A stolen or reused password is enough to reach this account.
+          </Alert>
+        )}
+
+        {error && <Alert tone="error">{error}</Alert>}
+
+        {!enabled && !setup && (
+          <button className="btn btn--primary" disabled={busy} onClick={begin}>
+            {busy ? "Preparing…" : "Set up two-step verification"}
+          </button>
+        )}
+
+        {!enabled && setup && (
+          <>
+            <p className="subtle">
+              Add this secret to your authenticator app, then enter the code it shows to
+              confirm the two agree.
+            </p>
+            <pre className="safety">{setup.formatted_secret}</pre>
+            <p className="subtle">
+              Or open <a href={setup.otpauth_uri}>this link</a> on the device with your
+              authenticator.
+            </p>
+            <Field label="Code from your app" id="totp-confirm">
+              <input
+                id="totp-confirm"
+                className="input"
+                value={code}
+                inputMode="numeric"
+                maxLength={6}
+                autoComplete="one-time-code"
+                onChange={(changeEvent) => setCode(changeEvent.target.value.replace(/\D/g, ""))}
+              />
+            </Field>
+            <div className="row" style={{ gap: "var(--sp-3)" }}>
+              <button className="btn btn--primary" disabled={busy || code.length < 6} onClick={confirm}>
+                {busy ? "Checking…" : "Confirm and turn on"}
+              </button>
+              <button className="btn" disabled={busy} onClick={() => { setSetup(null); setCode(""); }}>
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+
+        {enabled && (
+          <>
+            <p className="subtle">
+              Turning it off asks for both factors again, so an unlocked screen is not
+              enough to remove the protection.
+            </p>
+            <Field label="Account password" id="totp-off-pass">
+              <input
+                id="totp-off-pass"
+                type="password"
+                className="input"
+                value={password}
+                autoComplete="current-password"
+                onChange={(changeEvent) => setPassword(changeEvent.target.value)}
+              />
+            </Field>
+            <Field label="Code from your app" id="totp-off-code">
+              <input
+                id="totp-off-code"
+                className="input"
+                value={code}
+                inputMode="numeric"
+                maxLength={6}
+                autoComplete="one-time-code"
+                onChange={(changeEvent) => setCode(changeEvent.target.value.replace(/\D/g, ""))}
+              />
+            </Field>
+            <button className="btn" disabled={busy || !password || code.length < 6} onClick={turnOff}>
+              {busy ? "Working…" : "Turn off"}
+            </button>
+            <p className="subtle">
+              Lost your authenticator? Reset your password from the sign-in screen — that
+              is proved with your identity key, which outranks this, and clears it.
+            </p>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
 
 /** Browsers report themselves in a format nobody wants to read in full. */
 function describeAgent(agent) {
@@ -420,6 +579,8 @@ export default function SecurityRoute({ user, identity }) {
       <BackupPanel user={user} identity={identity} />
 
       <LockPanel user={user} identity={identity} />
+
+      <TwoFactorPanel user={user} />
 
       <SessionsPanel />
 

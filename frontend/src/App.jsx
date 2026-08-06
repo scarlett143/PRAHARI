@@ -76,6 +76,19 @@ export default function App() {
     }
   }, []);
 
+  // The api layer clears the token and fires this when the server stops accepting it,
+  // so a revoked session lands back on sign-in rather than on a wall of failures.
+  useEffect(() => {
+    const ended = () => {
+      setUser(null);
+      setIdentity(null);
+      setLockedRecord(null);
+      setConsoleTarget(null);
+    };
+    window.addEventListener("prahari:session-ended", ended);
+    return () => window.removeEventListener("prahari:session-ended", ended);
+  }, []);
+
   useEffect(() => {
     if (!getToken()) {
       setChecking(false);

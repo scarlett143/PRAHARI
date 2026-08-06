@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import security
-from ..crypto import pqc
+from ..crypto import pqc, totp
 from ..database import get_db
 from ..models import Session, User
 from ..security import CurrentUser
@@ -36,6 +36,8 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    #: Required only once the account has a confirmed second factor.
+    totp_code: str | None = Field(default=None, max_length=12)
 
 
 class TokenResponse(BaseModel):
@@ -124,6 +126,25 @@ async def login(
     if user.status != "active":
         raise HTTPException(403, "account is not active")
 
+    if user.totp_enabled:
+        # A distinct answer once the password is known good. It does reveal that the
+        # password was correct, which is unavoidable -- the client cannot be asked for a
+        # code it was never told to collect -- and is what every second-factor flow does.
+        if not body.totp_code:
+            raise HTTPException(
+                401,
+                detail={
+                    "code": "totp_required",
+                    "message": "this account requires a verification code",
+                },
+            )
+        if not totp.verify(user.totp_secret, body.totp_code):
+            await audit(
+                db, event="auth.totp_failed", actor_id=user.id, severity="medium", request=request
+            )
+            await db.commit()
+            raise HTTPException(401, detail={"code": "totp_invalid", "message": "that code is not valid"})
+
     if rehash:
         user.password_hash = rehash
     user.last_login = datetime.now(timezone.utc)
@@ -141,6 +162,7 @@ async def me(user: CurrentUser):
         "kind": user.kind,
         "status": user.status,
         "key_verified": user.key_verified,
+        "totp_enabled": bool(user.totp_enabled),
         "created_at": user.created_at,
     }
 
@@ -264,6 +286,13 @@ async def recovery_reset(
     user.pending_challenge = None
     user.challenge_issued_at = None
     user.last_login = datetime.now(timezone.utc)
+    # Clearing the second factor here is deliberate. A reset is proved with the identity
+    # key, which is a strictly stronger credential than password-plus-code -- it is the
+    # thing that decrypts the messages a second factor exists to protect. Leaving TOTP on
+    # would also make a lost authenticator unrecoverable, since this is the only way back.
+    if user.totp_enabled or user.totp_secret:
+        user.totp_enabled = False
+        user.totp_secret = None
     await audit(
         db,
         event="auth.password_reset",
@@ -274,6 +303,103 @@ async def recovery_reset(
     await security.revoke_sessions(db, user_id=user.id)
     await db.commit()
     return await token_response(db, user, request)
+
+
+class TotpEnableRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=12)
+
+
+class TotpDisableRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    code: str = Field(min_length=6, max_length=12)
+
+
+@router.post("/auth/2fa/setup")
+async def totp_setup(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Mint a secret and hand back what an authenticator needs to import it.
+
+    The secret is stored immediately but `totp_enabled` stays false, so an abandoned
+    setup never becomes a factor the account is judged against. Calling this again
+    replaces an unconfirmed secret, which is what someone retrying after losing the first
+    screen expects.
+    """
+    if user.totp_enabled:
+        raise HTTPException(409, "two-step verification is already on")
+
+    secret = totp.generate_secret()
+    user.totp_secret = secret
+    user.totp_enabled = False
+    await db.commit()
+    return {
+        "secret": secret,
+        "formatted_secret": totp.format_for_entry(secret),
+        "otpauth_uri": totp.provisioning_uri(secret, username=user.username),
+        "digits": totp.DIGITS,
+        "period_seconds": totp.PERIOD_SECONDS,
+    }
+
+
+@router.post("/auth/2fa/enable")
+async def totp_enable(
+    body: TotpEnableRequest,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Confirm the authenticator agrees before the factor starts being required.
+
+    Turning it on without this check is how people lock themselves out: a mistyped
+    secret or a badly skewed clock would only surface at the next sign-in, when it is too
+    late to fix from inside the account.
+    """
+    if user.totp_enabled:
+        raise HTTPException(409, "two-step verification is already on")
+    if not user.totp_secret:
+        raise HTTPException(409, "start setup first")
+    if not totp.verify(user.totp_secret, body.code):
+        raise HTTPException(400, "that code is not valid — check your device's clock")
+
+    user.totp_enabled = True
+    await audit(
+        db, event="auth.totp_enabled", actor_id=user.id, severity="medium", request=request
+    )
+    await db.commit()
+    return {"totp_enabled": True}
+
+
+@router.post("/auth/2fa/disable")
+async def totp_disable(
+    body: TotpDisableRequest,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Both the password and a current code, because an unlocked session is not proof.
+
+    The realistic threat is someone who sat down at a signed-in machine. Requiring the
+    two factors again means switching protection off costs exactly what getting in did.
+    """
+    if not user.totp_enabled:
+        raise HTTPException(409, "two-step verification is not on")
+
+    ok, _ = security.verify_password(user.password_hash, body.password)
+    if not ok or not totp.verify(user.totp_secret, body.code):
+        await audit(
+            db, event="auth.totp_disable_failed", actor_id=user.id, severity="high", request=request
+        )
+        await db.commit()
+        raise HTTPException(400, "password or code is not valid")
+
+    user.totp_enabled = False
+    user.totp_secret = None
+    await audit(
+        db, event="auth.totp_disabled", actor_id=user.id, severity="high", request=request
+    )
+    await db.commit()
+    return {"totp_enabled": False}
 
 
 @router.get("/auth/sessions")
