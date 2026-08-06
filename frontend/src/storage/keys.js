@@ -49,6 +49,26 @@ async function getAllInPrefix(prefix) {
 export const loadIdentity = (username) => get(`identity:${username}`);
 
 /**
+ * Usernames this browser holds private keys for.
+ *
+ * Only the KEYS are read, never the records, so listing identities never pulls private
+ * key material into memory. The sign-in screen uses this to answer the one question that
+ * decides whether a login can possibly work: are the keys for this account on THIS
+ * device? Nothing on the server can answer it, because the server never had them.
+ */
+export async function listIdentities() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const range = IDBKeyRange.bound("identity:", "identity:￿");
+    const request = tx.objectStore(STORE).getAllKeys(range);
+    request.onsuccess = () =>
+      resolve((request.result ?? []).map((key) => String(key).slice("identity:".length)).sort());
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/**
  * Overwriting an identity destroys the only copy of that user's private keys and makes
  * every message they ever received permanently undecryptable. Refuse by default so a
  * mistyped username on the register screen cannot silently wipe a real account.
