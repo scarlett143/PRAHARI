@@ -263,9 +263,15 @@ async def enroll(
     await db.commit()
     await db.refresh(account)
 
-    token, ttl = security.issue_access_token(
+    token, ttl, jti, expires_at = security.issue_access_token(
         user_id=account.id, username=account.username, role=account.role
     )
+    # Aircraft sessions are recorded and revocable like any other -- an endpoint that
+    # cannot be cut off is worse than a browser that cannot, not better.
+    security.record_session(
+        db, user_id=account.id, jti=jti, expires_at=expires_at, request=request, kind="uav"
+    )
+    await db.commit()
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -365,9 +371,15 @@ async def device_token(
     await audit(db, event="fleet.device_auth", actor_id=account.id, request=request)
     await db.commit()
 
-    token, ttl = security.issue_access_token(
+    token, ttl, jti, expires_at = security.issue_access_token(
         user_id=account.id, username=account.username, role=account.role
     )
+    # Aircraft sessions are recorded and revocable like any other -- an endpoint that
+    # cannot be cut off is worse than a browser that cannot, not better.
+    security.record_session(
+        db, user_id=account.id, jti=jti, expires_at=expires_at, request=request, kind="uav"
+    )
+    await db.commit()
     return {
         "access_token": token,
         "token_type": "bearer",

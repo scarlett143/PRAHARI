@@ -1,9 +1,134 @@
 import { useEffect, useState } from "react";
-import { opsApi } from "../lib/api.js";
+import { opsApi, sessionApi } from "../lib/api.js";
 import { Alert, Badge, Field, Panel } from "../components/ui.jsx";
 import { backupFilename, exportIdentity } from "../crypto/backup.js";
 import { MIN_PASSCODE_LENGTH, isLocked, lockIdentity } from "../crypto/keylock.js";
 import { loadIdentity, replaceIdentityRecord } from "../storage/keys.js";
+
+/** Browsers report themselves in a format nobody wants to read in full. */
+function describeAgent(agent) {
+  if (!agent) return "Unknown client";
+  const browser =
+    /Edg\//.test(agent) ? "Edge"
+      : /OPR\//.test(agent) ? "Opera"
+      : /Firefox\//.test(agent) ? "Firefox"
+      : /Chrome\//.test(agent) ? "Chrome"
+      : /Safari\//.test(agent) ? "Safari"
+      : "Browser";
+  const platform =
+    /iPhone|iPad/.test(agent) ? "iOS"
+      : /Android/.test(agent) ? "Android"
+      : /Mac OS X/.test(agent) ? "macOS"
+      : /Windows/.test(agent) ? "Windows"
+      : /Linux/.test(agent) ? "Linux"
+      : "";
+  return platform ? `${browser} on ${platform}` : browser;
+}
+
+function whenSeen(value) {
+  if (!value) return "just now";
+  const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000);
+  if (seconds < 120) return "active now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+  return new Date(value).toLocaleDateString();
+}
+
+/**
+ * Everywhere this account is signed in, and the means to end any of it.
+ *
+ * The point of this screen is the case where a device is lost: a token stays valid until
+ * it expires no matter what happens to the laptop it is on, so ending it has to be an
+ * action someone can take from somewhere else.
+ */
+function SessionsPanel() {
+  const [sessions, setSessions] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+
+  const refresh = () =>
+    sessionApi
+      .list()
+      .then(setSessions)
+      .catch((caught) => setError(caught.message));
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function end(sessionId) {
+    setBusy(sessionId);
+    setError("");
+    try {
+      await sessionApi.revoke(sessionId);
+      await refresh();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function endOthers() {
+    setBusy("others");
+    setError("");
+    try {
+      await sessionApi.revokeOthers();
+      await refresh();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const others = (sessions || []).filter((row) => !row.current);
+
+  return (
+    <Panel
+      eyebrow="Access"
+      title="Where you are signed in"
+      description="Ending a session stops its token on the next request it makes."
+      actions={
+        others.length > 0 && (
+          <button className="btn" disabled={busy === "others"} onClick={endOthers}>
+            {busy === "others" ? "Ending…" : `Sign out ${others.length} other${others.length > 1 ? "s" : ""}`}
+          </button>
+        )
+      }
+    >
+      {error && <Alert tone="error">{error}</Alert>}
+      {sessions === null && !error && <p className="subtle">Loading…</p>}
+
+      <ul className="stack" style={{ gap: "var(--sp-3)" }}>
+        {(sessions || []).map((row) => (
+          <li key={row.id} className="row" style={{ justifyContent: "space-between", gap: "var(--sp-3)" }}>
+            <div>
+              <strong>{row.kind === "uav" ? "Aircraft endpoint" : describeAgent(row.user_agent)}</strong>
+              <p className="subtle">
+                {row.ip_address ? `${row.ip_address} · ` : ""}
+                {whenSeen(row.last_seen_at)}
+              </p>
+            </div>
+            {row.current ? (
+              <Badge tone="good">this device</Badge>
+            ) : (
+              <button className="btn" disabled={busy === row.id} onClick={() => end(row.id)}>
+                {busy === row.id ? "Ending…" : "Sign out"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      {sessions !== null && sessions.length === 1 && (
+        <p className="subtle" style={{ marginTop: "var(--sp-3)" }}>
+          This is the only place you are signed in.
+        </p>
+      )}
+    </Panel>
+  );
+}
 
 /**
  * Turn the at-rest lock on, change it, or take it off.
@@ -295,6 +420,8 @@ export default function SecurityRoute({ user, identity }) {
       <BackupPanel user={user} identity={identity} />
 
       <LockPanel user={user} identity={identity} />
+
+      <SessionsPanel />
 
       <Panel eyebrow="Scope discipline" title="What it does not guarantee">
         <ul className="stack">

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from ..database import get_session_factory
 from ..models import User
 from ..realtime import ConnectionLimitReached, manager
-from ..security import decode_access_token
+from ..security import assert_session_live, decode_access_token
 from .common import channel_member_users, peer_user_ids, require_channel_member
 
 router = APIRouter(tags=["websocket"])
@@ -81,6 +81,13 @@ async def websocket_endpoint(websocket: WebSocket):
         user = (await db.execute(select(User).where(User.id == claims["sub"]))).scalars().first()
         if user is None or user.status != "active":
             await websocket.close(code=4403)
+            return
+        # A socket outlives the request that opened it, so revocation has to be checked
+        # here too -- otherwise signing a device out would leave its live stream running.
+        try:
+            await assert_session_live(db, claims)
+        except Exception:
+            await websocket.close(code=4401)
             return
         user_id = user.id
         username = user.username

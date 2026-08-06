@@ -87,6 +87,15 @@ export const authApi = {
   keyBundle: (username) => api(`/api/v2/keys/${encodeURIComponent(username)}`),
 };
 
+/* -- sessions ---------------------------------------------------------------
+   Where this account is signed in, and how to take any of it away. */
+
+export const sessionApi = {
+  list: () => api("/api/v2/auth/sessions"),
+  revoke: (sessionId) => api(`/api/v2/auth/sessions/${sessionId}`, { method: "DELETE" }),
+  revokeOthers: () => post("/api/v2/auth/sessions/revoke-others"),
+};
+
 /* -- workspaces and channels ----------------------------------------------- */
 
 export const workspaceApi = {

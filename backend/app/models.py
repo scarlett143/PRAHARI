@@ -73,6 +73,36 @@ class User(Base):
     channels = relationship("Channel", secondary=channel_members, back_populates="members")
 
 
+class Session(Base):
+    """One issued access token, so it can be listed and taken away.
+
+    A JWT validates itself from its signature, which is exactly why revocation needs a
+    record on this side: without one, a token that leaks stays good until it expires and
+    nothing can intervene. The row is keyed by the token's own `jti`, so presenting a
+    token is enough to find its session.
+
+    Rows are marked revoked rather than deleted. A missing row means "not a session this
+    server issued" and is refused, so deletion would quietly become a second way to be
+    logged out — and would lose the record of when a session was ended, which is the part
+    worth auditing.
+    """
+
+    __tablename__ = "sessions"
+
+    #: The `jti` claim of the token this row represents.
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    #: `human` or `uav` — an aircraft renewing its credentials creates sessions too, and
+    #: showing them next to browser sign-ins would be noise rather than information.
+    kind = Column(String(16), nullable=False, default="human")
+    user_agent = Column(String(256), nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class Server(Base):
     __tablename__ = "servers"
 

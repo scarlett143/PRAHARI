@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import security
 from ..crypto import pqc
 from ..database import get_db
-from ..models import User
+from ..models import Session, User
 from ..security import CurrentUser
 from .common import audit, b64d, b64e
 
@@ -55,8 +55,21 @@ class PublishKeysRequest(BaseModel):
     bundle_signature: str
 
 
-def token_response(user: User) -> TokenResponse:
-    token, ttl = security.issue_access_token(user_id=user.id, username=user.username, role=user.role)
+async def token_response(
+    db: AsyncSession, user: User, request: Request | None = None
+) -> TokenResponse:
+    """Issue a token and register the session it belongs to.
+
+    The two happen together on purpose: a token minted without a session row is one that
+    can never be listed or revoked, and validation now refuses those outright.
+    """
+    token, ttl, jti, expires_at = security.issue_access_token(
+        user_id=user.id, username=user.username, role=user.role
+    )
+    security.record_session(
+        db, user_id=user.id, jti=jti, expires_at=expires_at, request=request
+    )
+    await db.commit()
     return TokenResponse(
         access_token=token,
         expires_in=ttl,
@@ -89,7 +102,7 @@ async def register(
     await audit(db, event="user.register", actor_id=user.id, request=request)
     await db.commit()
     await db.refresh(user)
-    return token_response(user)
+    return await token_response(db, user, request)
 
 
 @router.post("/auth/login", response_model=TokenResponse)
@@ -116,7 +129,7 @@ async def login(
     user.last_login = datetime.now(timezone.utc)
     await audit(db, event="auth.login", actor_id=user.id, request=request)
     await db.commit()
-    return token_response(user)
+    return await token_response(db, user, request)
 
 
 @router.get("/auth/me")
@@ -258,8 +271,96 @@ async def recovery_reset(
         severity="medium",
         request=request,
     )
+    await security.revoke_sessions(db, user_id=user.id)
     await db.commit()
-    return token_response(user)
+    return await token_response(db, user, request)
+
+
+@router.get("/auth/sessions")
+async def list_sessions(user: CurrentUser, db: Annotated[AsyncSession, Depends(get_db)]):
+    """Every place this account is currently signed in.
+
+    Only live sessions are listed: a revoked or expired one is no longer a way in, and
+    showing it would turn a security screen into a history page.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (
+        await db.execute(
+            select(Session)
+            .where(
+                Session.user_id == user.id,
+                Session.revoked_at.is_(None),
+                Session.expires_at > now,
+            )
+            .order_by(Session.last_seen_at.desc())
+        )
+    ).scalars().all()
+
+    return [
+        {
+            "id": row.id,
+            "kind": row.kind,
+            "user_agent": row.user_agent,
+            "ip_address": row.ip_address,
+            "created_at": row.created_at,
+            "last_seen_at": row.last_seen_at,
+            "expires_at": row.expires_at,
+            # So the UI can label one "this device" and refuse to let you cut your own
+            # branch without meaning to.
+            "current": row.id == getattr(user, "current_session_id", None),
+        }
+        for row in rows
+    ]
+
+
+@router.delete("/auth/sessions/{session_id}")
+async def revoke_session(
+    session_id: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Sign one session out. Its token stops working on the next request it makes."""
+    session = (
+        await db.execute(
+            select(Session).where(Session.id == session_id, Session.user_id == user.id)
+        )
+    ).scalars().first()
+    if session is None:
+        raise HTTPException(404, "session not found")
+    if session.revoked_at is None:
+        session.revoked_at = datetime.now(timezone.utc)
+    await audit(
+        db,
+        event="auth.session_revoked",
+        actor_id=user.id,
+        severity="medium",
+        request=request,
+        detail=session_id,
+    )
+    await db.commit()
+    return {"revoked": session_id}
+
+
+@router.post("/auth/sessions/revoke-others")
+async def revoke_other_sessions(
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Sign out everywhere except here — the standard response to a lost device."""
+    current = getattr(user, "current_session_id", None)
+    count = await security.revoke_sessions(db, user_id=user.id, keep=current)
+    await audit(
+        db,
+        event="auth.sessions_revoked_others",
+        actor_id=user.id,
+        severity="medium",
+        request=request,
+        detail=str(count),
+    )
+    await db.commit()
+    return {"revoked": count}
 
 
 @router.post("/auth/challenge")

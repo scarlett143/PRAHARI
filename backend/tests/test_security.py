@@ -27,8 +27,13 @@ def test_argon2id_password_hashing_and_verification():
 
 
 def test_jwt_roundtrip_and_expired_rejection():
-    token, _ = issue_access_token(user_id="u1", username="alice", role="member")
-    assert decode_access_token(token)["sub"] == "u1"
+    token, _ttl, jti, expires_at = issue_access_token(user_id="u1", username="alice", role="member")
+    claims = decode_access_token(token)
+    assert claims["sub"] == "u1"
+    # The jti is what ties a token to a revocable session row, so it has to be the one
+    # handed back to the caller rather than an unrelated value.
+    assert claims["jti"] == jti
+    assert claims["exp"] == int(expires_at.timestamp())
 
     settings = get_settings()
     now = datetime.now(timezone.utc)
