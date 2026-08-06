@@ -81,6 +81,14 @@ export async function saveIdentity(username, value, { overwrite = false } = {}) 
   }
   return put(`identity:${username}`, value);
 }
+
+/**
+ * Replace a stored identity record with its locked form, or vice versa.
+ *
+ * Separate from `saveIdentity` because that one guards against clobbering an existing
+ * identity, which is exactly what locking and unlocking have to do.
+ */
+export const replaceIdentityRecord = (username, record) => put(`identity:${username}`, record);
 /* -- peer trust -------------------------------------------------------------
    What we have seen a contact's keys to be, and whether a human confirmed it.
 

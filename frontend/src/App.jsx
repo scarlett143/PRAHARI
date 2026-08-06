@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { authApi, getToken, setToken } from "./lib/api.js";
 import { useRealtime } from "./lib/useRealtime.js";
 import { loadIdentity } from "./storage/keys.js";
+import { isLocked } from "./crypto/keylock.js";
+import { publishKeyBundle } from "./crypto/publish.js";
+import UnlockRoute from "./routes/UnlockRoute.jsx";
 import { Badge, Mark, Spinner } from "./components/ui.jsx";
 import AuthRoute from "./routes/AuthRoute.jsx";
 import JoinRoute from "./routes/JoinRoute.jsx";
@@ -31,6 +34,7 @@ function readInviteCode() {
 export default function App() {
   const [user, setUser] = useState(null);
   const [identity, setIdentity] = useState(null);
+  const [lockedRecord, setLockedRecord] = useState(null);
   const [view, setView] = useState("messaging");
   const [consoleTarget, setConsoleTarget] = useState(null);
   const [checking, setChecking] = useState(true);
@@ -51,9 +55,18 @@ export default function App() {
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
 
+  // A locked record is held aside rather than put into `identity`: everything downstream
+  // treats a non-null identity as usable key material, and a wrapped blob is not.
   const acceptUser = useCallback(async (nextUser) => {
     setUser(nextUser);
-    setIdentity(await loadIdentity(nextUser.username));
+    const record = await loadIdentity(nextUser.username);
+    if (isLocked(record)) {
+      setLockedRecord(record);
+      setIdentity(null);
+    } else {
+      setLockedRecord(null);
+      setIdentity(record);
+    }
   }, []);
 
   useEffect(() => {
@@ -78,8 +91,19 @@ export default function App() {
     setToken("");
     setUser(null);
     setIdentity(null);
+    setLockedRecord(null);
     setConsoleTarget(null);
     setView("messaging");
+  }
+
+  /** Drop the keys from memory without ending the session. */
+  function lockNow() {
+    loadIdentity(user.username).then((record) => {
+      if (isLocked(record)) {
+        setIdentity(null);
+        setLockedRecord(record);
+      }
+    });
   }
 
   if (checking) return <Spinner label="Checking secure session…" />;
@@ -96,6 +120,32 @@ export default function App() {
     );
   }
   if (!user) return <AuthRoute onAuthenticated={acceptUser} />;
+
+  // Signed in, but the keys on this device are sealed. Nothing downstream can encrypt or
+  // decrypt until they are opened, so this stands in front of the whole console.
+  if (lockedRecord) {
+    return (
+      <UnlockRoute
+        user={user}
+        record={lockedRecord}
+        onUnlocked={async (unlocked) => {
+          setIdentity(unlocked);
+          setLockedRecord(null);
+          // The bundle can only be published once the keys are readable, which is after
+          // this point rather than at sign-in.
+          if (!user.key_verified) {
+            try {
+              await publishKeyBundle(unlocked);
+              setUser(await authApi.me());
+            } catch {
+              /* Surfaced by the console's own "identity verified" badge. */
+            }
+          }
+        }}
+        onSignOut={signOut}
+      />
+    );
+  }
 
   const active = consoleTarget
     ? { title: `Link · ${consoleTarget.callsign}` }

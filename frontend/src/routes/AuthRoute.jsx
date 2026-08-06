@@ -1,12 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authApi, opsApi, setToken } from "../lib/api.js";
 import { estimatePasswordStrength, generatePassword } from "../lib/password.js";
-import {
-  generateIdentity,
-  signBundle,
-  signChallenge,
-  signPasswordReset,
-} from "../crypto/identity.js";
+import { generateIdentity, signPasswordReset } from "../crypto/identity.js";
+import { publishKeyBundle } from "../crypto/publish.js";
+import { isLocked } from "../crypto/keylock.js";
 import { listIdentities, loadIdentity, saveIdentity } from "../storage/keys.js";
 import { importIdentity } from "../crypto/backup.js";
 import { Alert, Badge, Mark } from "../components/ui.jsx";
@@ -112,15 +109,7 @@ export default function AuthRoute({ onAuthenticated }) {
     passwordRef.current?.focus();
   }
 
-  async function publishBundle(identity) {
-    const { challenge } = await authApi.challenge();
-    await authApi.publishKeys({
-      x25519_public_key: identity.x25519Public,
-      ml_kem_encapsulation_key: identity.mlKemPublic,
-      challenge_signature: signChallenge(identity, challenge),
-      bundle_signature: signBundle(identity),
-    });
-  }
+  const publishBundle = publishKeyBundle;
 
   async function submit(submitEvent) {
     submitEvent.preventDefault();
@@ -130,6 +119,11 @@ export default function AuthRoute({ onAuthenticated }) {
     try {
       if (mode === "recover") {
         const identity = await loadIdentity(username);
+        if (isLocked(identity)) {
+          throw new Error(
+            "Your keys on this device are locked. Sign in and unlock them first, then reset the password.",
+          );
+        }
         if (!identity) {
           throw new Error(
             "This browser holds no keys for that account, so there is nothing here to prove it with.",
@@ -166,13 +160,15 @@ export default function AuthRoute({ onAuthenticated }) {
         const auth = await authApi.login({ username, password });
         setToken(auth.access_token);
         if (!auth.key_verified) {
-          const identity = await loadIdentity(username);
-          if (!identity) {
+          const record = await loadIdentity(username);
+          if (!record) {
             throw new Error(
               "This browser does not hold your private keys. Sign in from the browser you registered with — keys cannot be recovered from the server.",
             );
           }
-          await publishBundle(identity);
+          // A locked identity cannot be read until the passcode is entered, which happens
+          // after sign-in. The unlock screen republishes instead.
+          if (!isLocked(record)) await publishBundle(record);
         }
       }
       localStorage.setItem(LAST_USER_KEY, username);

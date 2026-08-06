@@ -2,6 +2,138 @@ import { useEffect, useState } from "react";
 import { opsApi } from "../lib/api.js";
 import { Alert, Badge, Field, Panel } from "../components/ui.jsx";
 import { backupFilename, exportIdentity } from "../crypto/backup.js";
+import { MIN_PASSCODE_LENGTH, isLocked, lockIdentity } from "../crypto/keylock.js";
+import { loadIdentity, replaceIdentityRecord } from "../storage/keys.js";
+
+/**
+ * Turn the at-rest lock on, change it, or take it off.
+ *
+ * Deliberately opt-in, and deliberately preceded by a warning about backups. A passcode
+ * that cannot be reset is a second way to lose the account, so pushing everyone into it
+ * would trade one kind of permanent loss for another.
+ */
+function LockPanel({ user, identity }) {
+  const [locked, setLocked] = useState(null);
+  const [passcode, setPasscode] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState("");
+
+  useEffect(() => {
+    if (!user) return;
+    loadIdentity(user.username).then((record) => setLocked(isLocked(record)));
+  }, [user]);
+
+  if (!identity) return null;
+
+  const mismatch = confirmation.length > 0 && passcode !== confirmation;
+
+  async function applyLock() {
+    setBusy(true);
+    setError("");
+    setDone("");
+    try {
+      const record = await lockIdentity(identity, user.username, passcode);
+      await replaceIdentityRecord(user.username, record);
+      setLocked(true);
+      setPasscode("");
+      setConfirmation("");
+      setDone(locked ? "Passcode changed." : "Keys are now encrypted on this device.");
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeLock() {
+    setBusy(true);
+    setError("");
+    setDone("");
+    try {
+      // The identity is already open in memory, so removing the lock is simply storing
+      // it back in the clear.
+      await replaceIdentityRecord(user.username, identity);
+      setLocked(false);
+      setDone("Lock removed. Keys are stored unencrypted again.");
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel
+      eyebrow="Key custody"
+      title="Lock keys on this device"
+      description="Encrypts your private keys in this browser's storage so a stolen machine is not a stolen identity."
+    >
+      <div className="stack" style={{ maxWidth: "34rem" }}>
+        {locked ? (
+          <Alert tone="good" title="Keys are encrypted at rest">
+            You will be asked for this passcode each time the app opens.
+          </Alert>
+        ) : (
+          <Alert tone="warning" title="Keys are stored unencrypted">
+            Anyone with access to this browser profile can read them directly.
+          </Alert>
+        )}
+
+        <Alert tone="info" title="Back up first">
+          The passcode never reaches the server and cannot be reset. If you forget it, the
+          only way back is the encrypted backup file above.
+        </Alert>
+
+        <Field
+          label={locked ? "New passcode" : "Passcode"}
+          id="lock-pass"
+          hint={`At least ${MIN_PASSCODE_LENGTH} characters. Not your account password.`}
+        >
+          <input
+            id="lock-pass"
+            type="password"
+            className="input"
+            value={passcode}
+            autoComplete="new-password"
+            onChange={(changeEvent) => setPasscode(changeEvent.target.value)}
+          />
+        </Field>
+
+        <Field label="Confirm passcode" id="lock-confirm">
+          <input
+            id="lock-confirm"
+            type="password"
+            className="input"
+            value={confirmation}
+            autoComplete="new-password"
+            onChange={(changeEvent) => setConfirmation(changeEvent.target.value)}
+          />
+        </Field>
+
+        {mismatch && <Alert tone="warning">The two passcodes do not match.</Alert>}
+        {error && <Alert tone="error">{error}</Alert>}
+        {done && <Alert tone="good">{done}</Alert>}
+
+        <div className="row" style={{ gap: "var(--sp-3)" }}>
+          <button
+            className="btn btn--primary"
+            disabled={busy || passcode.length < MIN_PASSCODE_LENGTH || mismatch || !confirmation}
+            onClick={applyLock}
+          >
+            {busy ? "Sealing…" : locked ? "Change passcode" : "Lock keys"}
+          </button>
+          {locked && (
+            <button className="btn" disabled={busy} onClick={removeLock}>
+              Remove lock
+            </button>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
 
 /**
  * Export the identity to a file only the holder can open.
@@ -133,7 +265,7 @@ export default function SecurityRoute({ user, identity }) {
 
   const limits = [
     ["Group forward secrecy is per epoch", "Direct chats ratchet, giving a key per message. A group shares one epoch key sealed to each member, so a compromised key exposes that epoch rather than a single message. Rotation is what advances it."],
-    ["Keys are not yet encrypted at rest", "Private keys sit in IndexedDB in the clear. Anyone with the unlocked device, or malicious JavaScript in this origin, can read them. A passphrase lock is the next capability in this stage."],
+    ["At-rest encryption is opt-in", "Private keys sit in IndexedDB in the clear unless you set a device passcode below. Even with one, the lock protects a stolen machine — not a session that is already open, where the keys are in memory by definition."],
     ["Browser trust", "IndexedDB keeps private keys off the server, but not away from malicious JavaScript running in this origin. XSS defeats it."],
     ["Metadata is visible", "The server necessarily sees accounts, membership, channel ids, timestamps, ciphertext sizes, and delivery events. End-to-end encryption protects content, not all metadata."],
     ["ML-KEM side channels", "Neither the browser nor the pure-Python ML-KEM implementation is claimed constant-time. Use liboqs for anything deployed."],
@@ -161,6 +293,8 @@ export default function SecurityRoute({ user, identity }) {
       </Panel>
 
       <BackupPanel user={user} identity={identity} />
+
+      <LockPanel user={user} identity={identity} />
 
       <Panel eyebrow="Scope discipline" title="What it does not guarantee">
         <ul className="stack">

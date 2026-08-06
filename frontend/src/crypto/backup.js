@@ -15,9 +15,9 @@
  * your identity that we hold, which is precisely the arrangement this product exists to
  * avoid.
  */
-import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { base64ToBytes, bytesToBase64, encoder } from "./bytes.js";
+import { ARCHIVE_KDF, deriveWrappingKey, randomNonce, randomSalt } from "./sealed.js";
 
 export const BACKUP_FORMAT = "prahari-identity-backup";
 export const BACKUP_VERSION = 1;
@@ -28,10 +28,7 @@ export const BACKUP_VERSION = 1;
  * offline attack rather than an online rate limit. Costs are written into the file so a
  * future version can raise them without orphaning old backups.
  */
-const KDF = { name: "argon2id", t: 3, m: 65536, p: 1, dkLen: 32 };
-
-const SALT_BYTES = 16;
-const NONCE_BYTES = 12;
+const KDF = ARCHIVE_KDF;
 
 /** The fields that constitute an identity. All are base64 in storage. */
 const IDENTITY_FIELDS = [
@@ -53,12 +50,7 @@ function headerAad(username, kdf, salt) {
   );
 }
 
-async function deriveKey(passphrase, salt, kdf) {
-  const raw = await argon2idAsync(encoder.encode(passphrase), salt, {
-    t: kdf.t, m: kdf.m, p: kdf.p, dkLen: kdf.dkLen ?? 32,
-  });
-  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
-}
+const deriveKey = (passphrase, salt, kdf) => deriveWrappingKey(passphrase, salt, kdf);
 
 /**
  * Seal an identity into a portable file.
@@ -74,8 +66,8 @@ export async function exportIdentity(identity, username, passphrase) {
     if (!identity[field]) throw new Error(`Identity is incomplete: ${field} is missing`);
   }
 
-  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-  const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES));
+  const salt = randomSalt();
+  const nonce = randomNonce();
   const key = await deriveKey(passphrase, salt, KDF);
 
   const plaintext = encoder.encode(
