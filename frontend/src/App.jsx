@@ -198,7 +198,7 @@ export default function App() {
           ) : view === "quantum" ? (
             <QuantumRoute />
           ) : (
-            <SecurityRoute identityAvailable={Boolean(identity)} />
+            <SecurityRoute user={user} identity={identity} />
           )}
         </main>
       </div>

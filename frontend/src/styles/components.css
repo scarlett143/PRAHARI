@@ -824,6 +824,25 @@
   box-shadow: var(--shadow-lg);
 }
 
+/* Safety numbers are read aloud, so they need even columns and generous tracking —
+   a proportional face turns "11111" and "00000" into different widths and makes
+   people lose their place mid-comparison. */
+.safety {
+  margin: 0;
+  padding: var(--sp-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  line-height: 1.7;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--ink);
+}
+
 .auth__mode {
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);

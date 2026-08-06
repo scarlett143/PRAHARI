@@ -8,6 +8,7 @@ import {
   signPasswordReset,
 } from "../crypto/identity.js";
 import { listIdentities, loadIdentity, saveIdentity } from "../storage/keys.js";
+import { importIdentity } from "../crypto/backup.js";
 import { Alert, Badge, Mark } from "../components/ui.jsx";
 
 /** Mirrors the server's own rule, so a bad name is caught before a round trip. */
@@ -225,7 +226,14 @@ export default function AuthRoute({ onAuthenticated }) {
         </aside>
 
         <section className="auth__card">
-          {mode === "recover" ? (
+          {mode === "restore" ? (
+            <div className="field__row">
+              <h2 className="auth__mode">Restore identity</h2>
+              <button type="button" className="link-btn" onClick={() => switchMode("login")}>
+                Back to sign in
+              </button>
+            </div>
+          ) : mode === "recover" ? (
             <div className="field__row">
               <h2 className="auth__mode">Reset password</h2>
               <button type="button" className="link-btn" onClick={() => switchMode("login")}>
@@ -247,6 +255,16 @@ export default function AuthRoute({ onAuthenticated }) {
             </div>
           )}
 
+          {mode === "restore" ? (
+            <RestorePanel
+              onRestored={(restoredName) => {
+                setUsername(restoredName);
+                refreshIdentities();
+                switchMode("login");
+              }}
+            />
+          ) : (
+          <>
           {identities.length > 0 && (
             <div className="auth__identities">
               <span className="field__label">Identities on this browser</span>
@@ -368,19 +386,124 @@ export default function AuthRoute({ onAuthenticated }) {
             </button>
 
             {mode === "login" && (
-              <button
-                type="button"
-                className="link-btn"
-                style={{ alignSelf: "center" }}
-                onClick={() => switchMode("recover")}
-              >
-                Forgot your password?
-              </button>
+              <div className="field__row" style={{ justifyContent: "center", gap: "var(--sp-4)" }}>
+                <button type="button" className="link-btn" onClick={() => switchMode("recover")}>
+                  Forgot your password?
+                </button>
+                <button type="button" className="link-btn" onClick={() => switchMode("restore")}>
+                  Restore from backup
+                </button>
+              </div>
             )}
           </form>
+          </>
+          )}
         </section>
       </div>
     </main>
+  );
+}
+
+/**
+ * Load an identity back out of an encrypted backup file.
+ *
+ * Restoring keys is not signing in — it puts the private keys back in this browser, and
+ * the account password is still needed afterwards. If that has been forgotten too, the
+ * restored key is exactly what authorises a reset, so the two flows compose into a full
+ * recovery: restore the file, then reset the password with the key it contained.
+ */
+function RestorePanel({ onRestored }) {
+  const [file, setFile] = useState(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [conflict, setConflict] = useState(null);
+
+  async function restore(replace = false) {
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    try {
+      const { username, identity } = await importIdentity(await file.text(), passphrase);
+
+      // An identity already here for the same name is only a problem if it is a
+      // *different* one -- restoring the same keys twice should be a no-op, not a scare.
+      const existing = await loadIdentity(username);
+      if (existing && !replace) {
+        if (existing.ed25519Public === identity.ed25519Public) {
+          onRestored(username);
+          return;
+        }
+        setConflict(username);
+        return;
+      }
+
+      await saveIdentity(username, identity, { overwrite: true });
+      setConflict(null);
+      onRestored(username);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="stack">
+      <p className="muted">
+        Open an encrypted backup to put your keys back in this browser. The file is
+        decrypted here — it is never uploaded.
+      </p>
+
+      <div className="field">
+        <label className="field__label" htmlFor="backup-file">Backup file</label>
+        <input
+          id="backup-file"
+          type="file"
+          accept="application/json,.json"
+          className="input"
+          onChange={(changeEvent) => {
+            setFile(changeEvent.target.files?.[0] ?? null);
+            setError("");
+            setConflict(null);
+          }}
+        />
+        <span className="field__hint">The .json file you downloaded from the security page.</span>
+      </div>
+
+      <div className="field">
+        <label className="field__label" htmlFor="backup-passphrase">Backup passphrase</label>
+        <input
+          id="backup-passphrase"
+          type="password"
+          className="input"
+          value={passphrase}
+          autoComplete="off"
+          onChange={(changeEvent) => setPassphrase(changeEvent.target.value)}
+        />
+        <span className="field__hint">
+          The passphrase you set when you created the backup. It cannot be reset.
+        </span>
+      </div>
+
+      {conflict && (
+        <Alert tone="warning" title="Different keys already stored here">
+          This browser holds a different identity for <strong>{conflict}</strong>.
+          Replacing it destroys those keys and any message history they decrypt.
+        </Alert>
+      )}
+      {error && <Alert tone="error">{error}</Alert>}
+
+      <button
+        type="button"
+        className="btn btn--primary btn--block"
+        disabled={busy || !file || !passphrase}
+        onClick={() => restore(Boolean(conflict))}
+      >
+        {busy ? "Opening…" : conflict ? "Replace stored keys" : "Restore identity"}
+      </button>
+      <p className="subtle">Opening runs a deliberately slow key derivation and takes a few seconds.</p>
+    </div>
   );
 }
 

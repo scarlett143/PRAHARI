@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { linkApi, workspaceApi } from "../lib/api.js";
+import { authApi, linkApi, workspaceApi } from "../lib/api.js";
+import { verifyRemoteBundle } from "../crypto/identity.js";
+import { formatForDisplay, identityFingerprint, safetyNumber } from "../crypto/verification.js";
+import { markPeerVerified, reconcilePeerTrust } from "../storage/keys.js";
 import {
   decryptForChannel,
   encryptForChannel,
@@ -472,6 +475,8 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
           <AddPeer workspace={activeWorkspace} onAdded={refreshWorkspaces} />
         )}
 
+        {channel && <PeerVerification channel={channel} user={user} identity={identity} />}
+
         <NewGroup
           user={user}
           links={links}
@@ -679,6 +684,151 @@ function FirstWorkspace({ onCreated, onOpen }) {
           {busy ? "Creating…" : "Create workspace"}
         </button>
       </div>
+    </Panel>
+  );
+}
+
+/**
+ * Confirm that the keys the relay handed you really belong to the people you are
+ * talking to — Stage 1, capability 23.
+ *
+ * Two jobs. The safety number is what two people compare out of band, and it matches
+ * only if each side is seeing the other's genuine key. The louder job is change
+ * detection: the fingerprint seen on first contact is remembered locally, and if it ever
+ * moves, that is surfaced as an alert rather than accepted quietly. A one-time check
+ * would miss a substitution introduced later, which is the interesting case.
+ */
+function PeerVerification({ channel, user, identity }) {
+  const [rows, setRows] = useState([]);
+  const [expanded, setExpanded] = useState("");
+
+  const peers = useMemo(
+    () => (channel?.members || []).filter((member) => member.id !== user.id),
+    [channel?.members, user.id],
+  );
+
+  const localBundle = useMemo(
+    () =>
+      identity && {
+        ed25519_public_key: identity.ed25519Public,
+        x25519_public_key: identity.x25519Public,
+        ml_kem_encapsulation_key: identity.mlKemPublic,
+      },
+    [identity],
+  );
+
+  useEffect(() => {
+    if (!localBundle || peers.length === 0) return;
+    let cancelled = false;
+
+    (async () => {
+      const collected = [];
+      for (const peer of peers) {
+        try {
+          const bundle = await authApi.keyBundle(peer.username);
+          if (!verifyRemoteBundle(bundle)) {
+            collected.push({ username: peer.username, error: "Bundle signature is invalid" });
+            continue;
+          }
+          const fingerprint = identityFingerprint(bundle);
+          const { state, record } = await reconcilePeerTrust(peer.username, fingerprint);
+          collected.push({
+            username: peer.username,
+            state,
+            record,
+            number: safetyNumber(localBundle, bundle),
+          });
+        } catch (caught) {
+          collected.push({ username: peer.username, error: caught.message });
+        }
+      }
+      if (!cancelled) setRows(collected);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [peers, localBundle]);
+
+  if (!identity || peers.length === 0) return null;
+
+  const changed = rows.filter((row) => row.state === "changed");
+
+  return (
+    <Panel eyebrow="Key custody" title="Verify contacts">
+      {changed.length > 0 && (
+        <Alert tone="error" title="A contact's keys changed">
+          {changed.map((row) => row.username).join(", ")} presented different keys than
+          before. That happens on a reinstall — but it is also what an intercepted
+          connection looks like. Confirm the new number with them before trusting it.
+        </Alert>
+      )}
+
+      <ul className="stack" style={{ gap: "var(--sp-2)", marginTop: changed.length ? "var(--sp-3)" : 0 }}>
+        {rows.map((row) => (
+          <li key={row.username} className="stack" style={{ gap: "var(--sp-2)" }}>
+            <div className="row" style={{ justifyContent: "space-between", gap: "var(--sp-2)" }}>
+              <button
+                type="button"
+                className="link-btn truncate"
+                onClick={() => setExpanded(expanded === row.username ? "" : row.username)}
+                aria-expanded={expanded === row.username}
+              >
+                {row.username}
+              </button>
+              {row.error ? (
+                <Badge tone="critical">error</Badge>
+              ) : row.state === "changed" ? (
+                <Badge tone="critical">keys changed</Badge>
+              ) : row.record?.verifiedAt ? (
+                <Badge tone="good">verified</Badge>
+              ) : (
+                <Badge tone="warning">unverified</Badge>
+              )}
+            </div>
+
+            {expanded === row.username && (
+              <div className="stack" style={{ gap: "var(--sp-2)" }}>
+                {row.error ? (
+                  <Alert tone="error">{row.error}</Alert>
+                ) : (
+                  <>
+                    <p className="subtle">
+                      Read these numbers to {row.username} in person or on a call you
+                      trust. If they match on both screens, no one is in between.
+                    </p>
+                    <pre className="safety">
+                      {formatForDisplay(row.number).join("\n")}
+                    </pre>
+                    {row.record?.verifiedAt ? (
+                      <p className="subtle">
+                        Verified {new Date(row.record.verifiedAt).toLocaleDateString()}.
+                      </p>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={async () => {
+                          const updated = await markPeerVerified(row.username, row.record.fingerprint);
+                          setRows((current) =>
+                            current.map((item) =>
+                              item.username === row.username
+                                ? { ...item, state: "known", record: updated }
+                                : item,
+                            ),
+                          );
+                        }}
+                      >
+                        These numbers match
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
     </Panel>
   );
 }

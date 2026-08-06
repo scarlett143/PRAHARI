@@ -81,6 +81,57 @@ export async function saveIdentity(username, value, { overwrite = false } = {}) 
   }
   return put(`identity:${username}`, value);
 }
+/* -- peer trust -------------------------------------------------------------
+   What we have seen a contact's keys to be, and whether a human confirmed it.
+
+   Kept local and never sent: this is precisely the record that must not be under the
+   relay's control, since its whole purpose is to catch the relay handing over a
+   different key than it did last time. */
+
+/** @returns {Promise<{fingerprint: string, firstSeen: string, verifiedAt: string|null}|null>} */
+export const loadPeerTrust = (username) => get(`trust:${username}`);
+
+export const savePeerTrust = (username, record) => put(`trust:${username}`, record);
+
+/**
+ * Reconcile a freshly fetched bundle against what this browser remembers.
+ *
+ * @returns {Promise<{state: "new"|"known"|"changed", record: object, previous: object|null}>}
+ *   `changed` is the one that matters -- it means the keys behind an existing contact
+ *   moved, which is either a reinstall or an attack, and only the contact can say which.
+ */
+export async function reconcilePeerTrust(username, fingerprint) {
+  const previous = await loadPeerTrust(username);
+  if (!previous) {
+    const record = { fingerprint, firstSeen: new Date().toISOString(), verifiedAt: null };
+    await savePeerTrust(username, record);
+    return { state: "new", record, previous: null };
+  }
+  if (previous.fingerprint === fingerprint) {
+    return { state: "known", record: previous, previous };
+  }
+  // Verification does NOT carry across a key change -- that would defeat the point.
+  const record = {
+    fingerprint,
+    firstSeen: new Date().toISOString(),
+    verifiedAt: null,
+    replacedFingerprint: previous.fingerprint,
+    replacedAt: new Date().toISOString(),
+  };
+  await savePeerTrust(username, record);
+  return { state: "changed", record, previous };
+}
+
+export async function markPeerVerified(username, fingerprint) {
+  const existing = (await loadPeerTrust(username)) ?? {
+    fingerprint,
+    firstSeen: new Date().toISOString(),
+  };
+  const record = { ...existing, fingerprint, verifiedAt: new Date().toISOString() };
+  await savePeerTrust(username, record);
+  return record;
+}
+
 export const saveSessionKey = (channelId, epoch, value) => put(`session:${channelId}:${epoch}`, value);
 export const loadSessionKey = (channelId, epoch) => get(`session:${channelId}:${epoch}`);
 
