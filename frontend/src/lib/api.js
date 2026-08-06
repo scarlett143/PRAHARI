@@ -79,6 +79,10 @@ export const authApi = {
   login: (body) => post("/api/v2/auth/login", body),
   me: () => api("/api/v2/auth/me"),
   challenge: () => post("/api/v2/auth/challenge"),
+  // Password recovery. Unauthenticated on purpose: the caller has lost the password, and
+  // proves the account with a signature from its identity key instead.
+  recoveryChallenge: (username) => post("/api/v2/auth/recovery/challenge", { username }),
+  recoveryReset: (body) => post("/api/v2/auth/recovery/reset", body),
   publishKeys: (body) => post("/api/v2/keys/publish", body),
   keyBundle: (username) => api(`/api/v2/keys/${encodeURIComponent(username)}`),
 };

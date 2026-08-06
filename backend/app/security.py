@@ -19,6 +19,7 @@ from .models import User
 from .crypto.identity import (
     ED25519_PUB_BYTES,
     bundle_signing_payload,
+    password_reset_signing_payload,
     session_offer_signing_payload,
     verify_ed25519_signature,
 )

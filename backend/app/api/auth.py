@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -128,6 +130,136 @@ async def me(user: CurrentUser):
         "key_verified": user.key_verified,
         "created_at": user.created_at,
     }
+
+
+class RecoveryChallengeRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+
+
+class PasswordResetRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    challenge: str = Field(min_length=1, max_length=128)
+    signature: str
+    new_password: str = Field(min_length=12, max_length=256)
+
+    @field_validator("new_password")
+    @classmethod
+    def reject_trivial_passwords(cls, value: str) -> str:
+        if value.lower() in {"password1234", "changemeplease", "123456789012"}:
+            raise ValueError("password is too common")
+        return value
+
+
+@router.post("/auth/recovery/challenge")
+async def recovery_challenge(
+    body: RecoveryChallengeRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Issue a nonce for a password reset proved with the account's identity key.
+
+    Unauthenticated by necessity -- the caller has lost the password, which is the only
+    thing `login` would have accepted. What replaces it is a signature from the Ed25519
+    private key the account was registered with, which is a strictly stronger claim: that
+    key is the account, and no message in the system is readable without it.
+
+    A challenge is returned whether or not the username exists, so this cannot be used to
+    enumerate accounts. For an unknown name the value is simply one that will never
+    verify.
+    """
+    user = (
+        await db.execute(select(User).where(User.username == body.username))
+    ).scalars().first()
+
+    value = security.new_challenge()
+    if user is not None and user.status == "active":
+        user.pending_challenge = value
+        user.challenge_issued_at = datetime.now(timezone.utc)
+        await db.commit()
+
+    return {"challenge": value, "ttl_seconds": security.CHALLENGE_TTL_SECONDS}
+
+
+@router.post("/auth/recovery/reset", response_model=TokenResponse)
+async def recovery_reset(
+    body: PasswordResetRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Set a new password on proof of holding the account's Ed25519 private key.
+
+    Signing in immediately afterwards is safe: the proof just given is stronger than the
+    password being replaced.
+
+    Note what this does NOT restore. The password only ever authenticated to the server;
+    message history is decryptable solely with the private keys in the browser's storage.
+    Someone who still has those keys can reset a forgotten password here. Someone who has
+    lost them has lost the account, and no server-side flow can change that.
+    """
+    generic = HTTPException(400, "password reset failed")
+
+    user = (
+        await db.execute(select(User).where(User.username == body.username))
+    ).scalars().first()
+    if user is None or user.status != "active":
+        raise generic
+    if not user.pending_challenge or not user.challenge_issued_at:
+        raise generic
+
+    issued = user.challenge_issued_at
+    if issued.tzinfo is None:
+        issued = issued.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - issued > timedelta(seconds=security.CHALLENGE_TTL_SECONDS):
+        user.pending_challenge = None
+        user.challenge_issued_at = None
+        await db.commit()
+        raise HTTPException(400, "challenge expired")
+
+    # Compare against the stored challenge rather than trusting the one supplied, so a
+    # caller cannot pick the nonce they already hold a signature for.
+    if not secrets.compare_digest(user.pending_challenge, body.challenge):
+        raise generic
+
+    signature = b64d(body.signature, expect=64, field="signature")
+    payload = security.password_reset_signing_payload(
+        username=user.username,
+        challenge=user.pending_challenge,
+        new_password_digest=hashlib.sha256(body.new_password.encode("utf-8")).digest(),
+    )
+    if not security.verify_signature(
+        ed25519_public_key=user.ed25519_public_key,
+        message=payload,
+        signature=signature,
+    ):
+        # Burn the challenge: a failed proof must not leave a live nonce to grind against.
+        user.pending_challenge = None
+        user.challenge_issued_at = None
+        await audit(
+            db,
+            event="auth.password_reset_proof_failed",
+            actor_id=user.id,
+            severity="high",
+            request=request,
+        )
+        await db.commit()
+        raise generic
+
+    try:
+        user.password_hash = security.hash_password(body.new_password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+    user.pending_challenge = None
+    user.challenge_issued_at = None
+    user.last_login = datetime.now(timezone.utc)
+    await audit(
+        db,
+        event="auth.password_reset",
+        actor_id=user.id,
+        severity="medium",
+        request=request,
+    )
+    await db.commit()
+    return token_response(user)
 
 
 @router.post("/auth/challenge")

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authApi, opsApi, setToken } from "../lib/api.js";
 import { estimatePasswordStrength, generatePassword } from "../lib/password.js";
-import { generateIdentity, signBundle, signChallenge } from "../crypto/identity.js";
+import {
+  generateIdentity,
+  signBundle,
+  signChallenge,
+  signPasswordReset,
+} from "../crypto/identity.js";
 import { listIdentities, loadIdentity, saveIdentity } from "../storage/keys.js";
 import { Alert, Badge, Mark } from "../components/ui.jsx";
 
@@ -73,9 +78,14 @@ export default function AuthRoute({ onAuthenticated }) {
   // created on the server, leaving an account whose keys never existed. Catch it here.
   const registerWouldClobber = mode === "register" && hasLocalKeys;
 
+  // Recovery is a signature from the account's identity key, so it can only be done from
+  // a browser holding that key. Nothing on the server can stand in for it.
+  const recoveryImpossible = mode === "recover" && Boolean(username) && !hasLocalKeys;
+
   const blocked =
     busy || !username || !password || Boolean(usernameError) || registerWouldClobber ||
-    (mode === "register" && password.length < MIN_PASSWORD_LENGTH);
+    recoveryImpossible ||
+    (mode !== "login" && password.length < MIN_PASSWORD_LENGTH);
 
   function switchMode(next) {
     setMode(next);
@@ -117,7 +127,29 @@ export default function AuthRoute({ onAuthenticated }) {
     setError("");
     setNotice("");
     try {
-      if (mode === "register") {
+      if (mode === "recover") {
+        const identity = await loadIdentity(username);
+        if (!identity) {
+          throw new Error(
+            "This browser holds no keys for that account, so there is nothing here to prove it with.",
+          );
+        }
+        const { challenge } = await authApi.recoveryChallenge(username);
+        const auth = await authApi.recoveryReset({
+          username,
+          challenge,
+          signature: await signPasswordReset(identity, {
+            username,
+            challenge,
+            newPassword: password,
+          }),
+          new_password: password,
+        });
+        setToken(auth.access_token);
+        // The reset proved key ownership, which is a stronger claim than the password it
+        // replaced -- so there is nothing left to check before signing in.
+        if (!auth.key_verified) await publishBundle(identity);
+      } else if (mode === "register") {
         const identity = generateIdentity();
         // Register before persisting: writing first would clobber an existing
         // local identity when the username is already taken.
@@ -193,18 +225,27 @@ export default function AuthRoute({ onAuthenticated }) {
         </aside>
 
         <section className="auth__card">
-          <div className="segmented" role="group" aria-label="Authentication mode">
-            <button type="button" aria-pressed={mode === "login"} onClick={() => switchMode("login")}>
-              Sign in
-            </button>
-            <button
-              type="button"
-              aria-pressed={mode === "register"}
-              onClick={() => switchMode("register")}
-            >
-              Create identity
-            </button>
-          </div>
+          {mode === "recover" ? (
+            <div className="field__row">
+              <h2 className="auth__mode">Reset password</h2>
+              <button type="button" className="link-btn" onClick={() => switchMode("login")}>
+                Back to sign in
+              </button>
+            </div>
+          ) : (
+            <div className="segmented" role="group" aria-label="Authentication mode">
+              <button type="button" aria-pressed={mode === "login"} onClick={() => switchMode("login")}>
+                Sign in
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === "register"}
+                onClick={() => switchMode("register")}
+              >
+                Create identity
+              </button>
+            </div>
+          )}
 
           {identities.length > 0 && (
             <div className="auth__identities">
@@ -251,9 +292,9 @@ export default function AuthRoute({ onAuthenticated }) {
             <div className="field">
               <div className="field__row">
                 <label className="field__label" htmlFor="password">
-                  Password
+                  {mode === "recover" ? "New password" : "Password"}
                 </label>
-                {mode === "register" && (
+                {mode !== "login" && (
                   <button type="button" className="link-btn" onClick={useGeneratedPassword}>
                     Generate
                   </button>
@@ -286,12 +327,12 @@ export default function AuthRoute({ onAuthenticated }) {
                 </button>
               </div>
 
-              {mode === "register" && password && <StrengthMeter strength={strength} />}
+              {mode !== "login" && password && <StrengthMeter strength={strength} />}
 
               <span className="field__hint" id="password-hint">
-                {mode === "register"
-                  ? `At least ${MIN_PASSWORD_LENGTH} characters. This password unwraps your keys — it cannot be reset.`
-                  : "The password you chose when you created this identity."}
+                {mode === "login"
+                  ? "The password you chose when you created this identity."
+                  : `At least ${MIN_PASSWORD_LENGTH} characters. It authenticates you to the server; your keys stay in this browser either way.`}
               </span>
             </div>
 
@@ -317,8 +358,25 @@ export default function AuthRoute({ onAuthenticated }) {
             {error && <Alert tone="error">{error}</Alert>}
 
             <button className="btn btn--primary btn--block" disabled={blocked}>
-              {busy ? "Working…" : mode === "login" ? "Sign in" : "Create secure identity"}
+              {busy
+                ? "Working…"
+                : mode === "login"
+                  ? "Sign in"
+                  : mode === "recover"
+                    ? "Reset password and sign in"
+                    : "Create secure identity"}
             </button>
+
+            {mode === "login" && (
+              <button
+                type="button"
+                className="link-btn"
+                style={{ alignSelf: "center" }}
+                onClick={() => switchMode("recover")}
+              >
+                Forgot your password?
+              </button>
+            )}
           </form>
         </section>
       </div>
@@ -333,6 +391,23 @@ export default function AuthRoute({ onAuthenticated }) {
  */
 function KeyAvailability({ mode, username, usernameError, hasLocalKeys }) {
   if (!username || usernameError) return null;
+
+  if (mode === "recover") {
+    return hasLocalKeys ? (
+      <Alert tone="good" title="This browser can prove the account is yours">
+        Your identity key for <strong>{username}</strong> is stored here. Signing a
+        one-time challenge with it replaces the password — no email, and nothing on the
+        server could have done it instead.
+      </Alert>
+    ) : (
+      <Alert tone="error" title="Password cannot be reset from this browser">
+        A reset is authorised by the account's identity key, and nothing stored here
+        belongs to <strong>{username}</strong>. Use the browser you registered with. If
+        those keys are gone the account cannot be recovered by anyone, including the
+        server — that is the property that keeps your messages private.
+      </Alert>
+    );
+  }
 
   if (mode === "register" && hasLocalKeys) {
     return (

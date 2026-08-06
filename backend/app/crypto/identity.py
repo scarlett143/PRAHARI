@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 ED25519_PUB_BYTES = 32
 BUNDLE_LABEL = b"PRAHARI-KEY-BUNDLE-V1\x00"
 SESSION_OFFER_LABEL = b"PRAHARI-SESSION-OFFER-V1\x00"
+PASSWORD_RESET_LABEL = b"PRAHARI-PASSWORD-RESET-V1\x00"
 
 
 def verify_ed25519_signature(*, public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -21,6 +22,30 @@ def verify_ed25519_signature(*, public_key: bytes, message: bytes, signature: by
 
 def bundle_signing_payload(*, x25519_public_key: bytes, ml_kem_encapsulation_key: bytes) -> bytes:
     return BUNDLE_LABEL + x25519_public_key + ml_kem_encapsulation_key
+
+
+def password_reset_signing_payload(
+    *, username: str, challenge: str, new_password_digest: bytes
+) -> bytes:
+    """Bytes proving the holder of an account's identity key asked for THIS reset.
+
+    Its own label matters more here than anywhere else. Key publication signs the bare
+    challenge string, so without domain separation a signature captured from that flow
+    would be a valid password reset for the same account -- the two would be the same
+    bytes. The label makes them disjoint message spaces.
+
+    The new password is bound in as a digest, so a signature cannot be lifted and reused
+    to set a *different* password, and the password itself never appears in a payload
+    that might be logged.
+    """
+    return (
+        PASSWORD_RESET_LABEL
+        + username.encode("utf-8")
+        + b"\x00"
+        + challenge.encode("utf-8")
+        + b"\x00"
+        + new_password_digest
+    )
 
 
 def session_offer_signing_payload(

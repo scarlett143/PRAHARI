@@ -26,6 +26,29 @@ export function signChallenge(identity, challenge) {
   return bytesToBase64(signature);
 }
 
+const PASSWORD_RESET_LABEL = encoder.encode("PRAHARI-PASSWORD-RESET-V1\0");
+
+/**
+ * Prove to the server that this browser holds the account's identity key, and that it
+ * asked for this specific new password.
+ *
+ * Its own label, separate from the bare-challenge signature used when publishing keys:
+ * without that, a signature produced by one flow would be valid for the other, and key
+ * publication would silently double as a password reset.
+ */
+export async function signPasswordReset(identity, { username, challenge, newPassword }) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", encoder.encode(newPassword)),
+  );
+  const payload = concatBytes(
+    PASSWORD_RESET_LABEL,
+    encoder.encode(username), new Uint8Array([0]),
+    encoder.encode(challenge), new Uint8Array([0]),
+    digest,
+  );
+  return bytesToBase64(ed25519.sign(payload, base64ToBytes(identity.ed25519Secret)));
+}
+
 export function bundlePayload(xPublic, mlPublic) {
   return concatBytes(BUNDLE_LABEL, xPublic, mlPublic);
 }

@@ -824,6 +824,12 @@
   box-shadow: var(--shadow-lg);
 }
 
+.auth__mode {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  color: var(--ink);
+}
+
 .auth__identities {
   display: flex;
   flex-direction: column;
