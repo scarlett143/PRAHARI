@@ -14,31 +14,43 @@ export default function FleetRoute({ onOpenConsole }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  // Typing should not fire a request per keystroke on a box this size.
+  const [appliedFilter, setAppliedFilter] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setAppliedFilter(filter.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [filter]);
+
+  // A new search starts at the beginning; staying on page 4 of the previous result is
+  // how a search appears to return nothing.
+  useEffect(() => {
+    setPage(0);
+  }, [appliedFilter]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await fleetApi.list({ limit: PAGE_SIZE, offset: page * PAGE_SIZE }));
+      setData(
+        await fleetApi.list({
+          limit: PAGE_SIZE,
+          offset: page * PAGE_SIZE,
+          query: appliedFilter || undefined,
+        }),
+      );
       setError("");
     } catch (caught) {
       setError(caught.message);
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, [page, appliedFilter]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const visible = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    if (!needle) return data.endpoints;
-    return data.endpoints.filter(
-      (item) =>
-        item.callsign.toLowerCase().includes(needle) ||
-        (item.fleet ?? "").toLowerCase().includes(needle),
-    );
-  }, [data.endpoints, filter]);
+  // The server has already applied the search across the whole registry.
+  const visible = data.endpoints;
 
   const summary = useMemo(() => {
     const enrolled = data.endpoints.filter((item) => item.enrolled_at).length;

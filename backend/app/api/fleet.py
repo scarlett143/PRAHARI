@@ -15,7 +15,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -395,27 +395,43 @@ async def list_uavs(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     fleet: str | None = None,
+    query: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ):
+    """List endpoints, narrowed by fleet name or a search over callsign and fleet.
+
+    Searching has to happen here rather than in the browser: the console pages through a
+    registry sized for a thousand endpoints, so filtering only what one page happens to
+    hold would silently miss every match on every other page.
+    """
     await _require_operator(user)
-    statement = (
-        select(UavProfile, User)
-        .join(User, UavProfile.user_id == User.id)
-        .where(UavProfile.operator_id == user.id)
-    )
+
+    conditions = [UavProfile.operator_id == user.id]
     if fleet:
-        statement = statement.where(UavProfile.fleet == fleet)
+        conditions.append(UavProfile.fleet == fleet)
+    if query and query.strip():
+        needle = f"%{query.strip().lower()}%"
+        conditions.append(
+            or_(
+                func.lower(UavProfile.callsign).like(needle),
+                func.lower(UavProfile.fleet).like(needle),
+            )
+        )
+
     rows = (
         await db.execute(
-            statement.order_by(UavProfile.callsign.asc())
+            select(UavProfile, User)
+            .join(User, UavProfile.user_id == User.id)
+            .where(*conditions)
+            .order_by(UavProfile.callsign.asc())
             .offset(max(offset, 0))
             .limit(min(max(limit, 1), 1000))
         )
     ).all()
-    total = await db.scalar(
-        select(func.count(UavProfile.id)).where(UavProfile.operator_id == user.id)
-    )
+    # Counted under the same conditions as the rows. Counting everything while returning
+    # a filtered page is what produces a search result followed by twenty empty pages.
+    total = await db.scalar(select(func.count(UavProfile.id)).where(*conditions))
     return {
         "total": int(total or 0),
         "returned": len(rows),

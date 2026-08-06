@@ -168,9 +168,11 @@ export const linkApi = {
 /* -- fleet ------------------------------------------------------------------ */
 
 export const fleetApi = {
-  list: ({ fleet, limit = 200, offset = 0 } = {}) => {
+  list: ({ fleet, query, limit = 200, offset = 0 } = {}) => {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (fleet) params.set("fleet", fleet);
+    // Searched server-side so matches on later pages are found, not just the page in hand.
+    if (query) params.set("query", query);
     return api(`/api/v2/fleet/uavs?${params}`);
   },
   provision: (body) => post("/api/v2/fleet/uavs", body),

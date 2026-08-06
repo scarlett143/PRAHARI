@@ -263,3 +263,43 @@ def test_uav_accounts_are_hidden_from_human_user_search():
 
         results = client.get(f"/api/v2/users?query={callsign}", headers=operator_headers).json()
         assert results == []
+
+
+def test_fleet_search_spans_the_whole_registry_not_just_one_page():
+    """Searching has to happen server-side, and the total has to match the search.
+
+    Filtering only the page in hand misses every match elsewhere, and counting the whole
+    registry while returning a filtered page produces a result followed by empty pages.
+    """
+    with TestClient(app) as client:
+        headers, _, _ = register_verified(client, "fleet_search_op")
+
+        for callsign in ("alpha-01", "alpha-02", "bravo-01"):
+            fleet = "alpha" if callsign.startswith("alpha") else "bravo"
+            assert client.post(
+                "/api/v2/fleet/uavs",
+                headers=headers,
+                json={"callsign": callsign, "fleet": fleet},
+            ).status_code == 200
+
+        # Matching a callsign fragment.
+        found = client.get("/api/v2/fleet/uavs?query=alpha-0", headers=headers).json()
+        assert found["total"] == 2, "the count must reflect the search, not the whole registry"
+        assert sorted(row["callsign"] for row in found["endpoints"]) == ["alpha-01", "alpha-02"]
+
+        # Matching a fleet name.
+        by_fleet = client.get("/api/v2/fleet/uavs?query=bravo", headers=headers).json()
+        assert by_fleet["total"] == 1
+        assert by_fleet["endpoints"][0]["callsign"] == "bravo-01"
+
+        # A match that sits beyond the first page is still found.
+        paged = client.get("/api/v2/fleet/uavs?query=bravo-01&limit=1&offset=0", headers=headers).json()
+        assert paged["total"] == 1
+        assert paged["endpoints"][0]["callsign"] == "bravo-01"
+
+        # Case-insensitive, and a miss is an empty result rather than everything.
+        assert client.get("/api/v2/fleet/uavs?query=ALPHA-01", headers=headers).json()["total"] == 1
+        assert client.get("/api/v2/fleet/uavs?query=nothing-here", headers=headers).json()["total"] == 0
+
+        # No query still lists everything.
+        assert client.get("/api/v2/fleet/uavs", headers=headers).json()["total"] == 3
