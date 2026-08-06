@@ -26,6 +26,27 @@ def test_argon2id_password_hashing_and_verification():
     assert not verify_password(stored, "wrong-password-value")[0]
 
 
+def test_passwords_hashed_under_the_old_cost_still_verify_and_are_rehashed():
+    """Lowering the Argon2 cost must not lock existing accounts out.
+
+    Argon2 encodes its parameters inside the hash, so an old password verifies against
+    the cost it was created with. What must also happen is the upgrade: the stored hash
+    should be reissued at the current cost on the next successful login, or the account
+    keeps paying the old price forever.
+    """
+    from argon2 import PasswordHasher
+
+    legacy = PasswordHasher(time_cost=3, memory_cost=64 * 1024, parallelism=4)
+    stored = legacy.hash("correct-horse-battery-staple")
+
+    ok, rehashed = verify_password(stored, "correct-horse-battery-staple")
+    assert ok, "an account created under the previous cost must still be able to log in"
+    assert rehashed is not None, "the stored hash should be upgraded to the current cost"
+    # And the replacement is usable in its own right.
+    assert verify_password(rehashed, "correct-horse-battery-staple")[0]
+    assert not verify_password(stored, "wrong-password-value")[0]
+
+
 def test_jwt_roundtrip_and_expired_rejection():
     token, _ttl, jti, expires_at = issue_access_token(user_id="u1", username="alice", role="member")
     claims = decode_access_token(token)

@@ -37,12 +37,18 @@ class Settings(BaseSettings):
     # Sized for the 1000-endpoint target. Every aircraft holds one long-lived WebSocket
     # plus short REST bursts, so concurrent *database* work is far below the endpoint
     # count; these defaults leave headroom without exhausting PostgreSQL's max_connections.
-    db_pool_size: int = Field(default=20, ge=1)
-    db_max_overflow: int = Field(default=30, ge=0)
+    #
+    # Sized for a small shared host rather than for the ceiling. Each PostgreSQL backend
+    # costs several megabytes whether or not it is busy, so a pool able to open 50 of them
+    # is a few hundred megabytes this box does not have to spare. Raise on hardware that
+    # warrants it.
+    db_pool_size: int = Field(default=5, ge=1)
+    db_max_overflow: int = Field(default=5, ge=0)
     db_pool_timeout_seconds: int = Field(default=30, ge=1)
     db_pool_recycle_seconds: int = Field(default=1800, ge=60)
-    #: Upper bound on simultaneous WebSocket clients. 0 disables the limit.
-    max_websocket_connections: int = Field(default=2000, ge=0)
+    #: Upper bound on simultaneous WebSocket clients. 0 disables the limit. Every open
+    #: socket holds kernel and application buffers, so this is a real memory ceiling.
+    max_websocket_connections: int = Field(default=200, ge=0)
 
     polygon_rpc_url: str = Field(default="")
     anchor_contract_address: str = Field(default="")

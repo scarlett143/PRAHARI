@@ -24,7 +24,18 @@ from .crypto.identity import (
     verify_ed25519_signature,
 )
 
-_hasher = PasswordHasher(time_cost=3, memory_cost=64 * 1024, parallelism=4)
+#: Argon2id cost, tuned for the 2-core box this actually runs on.
+#:
+#: The previous setting (t=3, 64 MiB, p=4) asked for four lanes on two cores, so logins
+#: fought each other for CPU, and every concurrent hash reserved 64 MiB on a host that
+#: also runs a control panel and billing. This is OWASP's second recommended profile --
+#: 19 MiB, t=2, p=1 -- which they treat as equivalent in strength to the 64 MiB one, and
+#: it costs roughly a third of the memory with no lane contention.
+#:
+#: Changing this is safe for existing accounts: argon2 stores its parameters inside the
+#: hash, so old passwords still verify against their original cost, and `verify_password`
+#: already rehashes to the current profile on the next successful login.
+_hasher = PasswordHasher(time_cost=2, memory_cost=19 * 1024, parallelism=1)
 _dummy_password_hash = _hasher.hash("prahari-unknown-user-timing-equalizer")
 _bearer = HTTPBearer(auto_error=False)
 

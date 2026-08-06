@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { authApi, getToken, setToken } from "./lib/api.js";
 import { useRealtime } from "./lib/useRealtime.js";
 import { loadIdentity } from "./storage/keys.js";
@@ -9,11 +9,15 @@ import { Badge, Mark, Spinner } from "./components/ui.jsx";
 import AuthRoute from "./routes/AuthRoute.jsx";
 import JoinRoute from "./routes/JoinRoute.jsx";
 import MessagingRoute from "./routes/MessagingRoute.jsx";
-import FleetRoute from "./routes/FleetRoute.jsx";
-import LinkConsoleRoute from "./routes/LinkConsoleRoute.jsx";
-import ProofsRoute from "./routes/ProofsRoute.jsx";
-import QuantumRoute from "./routes/QuantumRoute.jsx";
-import SecurityRoute from "./routes/SecurityRoute.jsx";
+
+// Split out of the initial download. Messaging is what almost every session opens on;
+// the map, charts and Argon2 that these pull in are dead weight until someone actually
+// navigates to them, and on a low-powered device that is parse time as well as bytes.
+const FleetRoute = lazy(() => import("./routes/FleetRoute.jsx"));
+const LinkConsoleRoute = lazy(() => import("./routes/LinkConsoleRoute.jsx"));
+const ProofsRoute = lazy(() => import("./routes/ProofsRoute.jsx"));
+const QuantumRoute = lazy(() => import("./routes/QuantumRoute.jsx"));
+const SecurityRoute = lazy(() => import("./routes/SecurityRoute.jsx"));
 
 const VIEWS = [
   { id: "messaging", label: "Messaging", glyph: "◈", title: "Secure messaging" },
@@ -35,6 +39,8 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [identity, setIdentity] = useState(null);
   const [lockedRecord, setLockedRecord] = useState(null);
+  // True once we know this device's record is sealed, so the rail can offer to re-seal it.
+  const [lockable, setLockable] = useState(false);
   const [view, setView] = useState("messaging");
   const [consoleTarget, setConsoleTarget] = useState(null);
   const [checking, setChecking] = useState(true);
@@ -62,6 +68,7 @@ export default function App() {
     const record = await loadIdentity(nextUser.username);
     if (isLocked(record)) {
       setLockedRecord(record);
+      setLockable(true);
       setIdentity(null);
     } else {
       setLockedRecord(null);
@@ -131,6 +138,7 @@ export default function App() {
         onUnlocked={async (unlocked) => {
           setIdentity(unlocked);
           setLockedRecord(null);
+          setLockable(true);
           // The bundle can only be published once the keys are readable, which is after
           // this point rather than at sign-in.
           if (!user.key_verified) {
@@ -198,6 +206,12 @@ export default function App() {
             <span aria-hidden="true">{theme === "dark" ? "☾" : "☀"}</span>
             {theme === "dark" ? "Dark theme" : "Light theme"}
           </button>
+          {lockable && (
+            <button className="nav-item" onClick={lockNow}>
+              <span aria-hidden="true">⚿</span>
+              Lock keys
+            </button>
+          )}
           <button className="nav-item" onClick={signOut}>
             <span aria-hidden="true">⤶</span>
             Sign out
@@ -226,6 +240,7 @@ export default function App() {
         </header>
 
         <main className="view" id="main">
+          <Suspense fallback={<Spinner label="Loading…" />}>
           {consoleTarget ? (
             <LinkConsoleRoute
               target={consoleTarget}
@@ -250,6 +265,7 @@ export default function App() {
           ) : (
             <SecurityRoute user={user} identity={identity} />
           )}
+          </Suspense>
         </main>
       </div>
     </div>
