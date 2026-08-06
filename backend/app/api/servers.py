@@ -132,9 +132,10 @@ async def add_member(
         if target.id in member_ids:
             joined.append(channel.name)
             continue
-        # The hybrid session layer is strictly two-party. Dropping a third member into a
-        # channel that already has two would leave it permanently unable to establish a
-        # session key, silently breaking encryption for everyone already in it.
+        # Joining a workspace does not join you to conversations already in progress.
+        # A channel's epoch key is sealed to the members it had when the epoch opened, so
+        # someone dropped in here would hold no copy and read nothing. Growing a group is
+        # a deliberate act that re-keys the channel -- see POST /channels/{id}/members.
         if len(member_ids) >= 2:
             skipped.append(channel.name)
             continue

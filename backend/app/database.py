@@ -61,13 +61,22 @@ async def get_db():
 #: This is a deliberate stopgap, not a migration system. It only ever adds nullable
 #: columns, never drops, renames or retypes anything, so it cannot destroy data. Alembic
 #: is the right answer as soon as a change needs backfilling or a type change.
+#: Logical types, resolved per dialect below, because "the binary one" is spelled
+#: differently on PostgreSQL and SQLite and this table is created on both.
 ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("channels", "initiator_id", "VARCHAR"),
+    ("session_offers", "wrapped_group_key", "BINARY"),
 )
+
+_COLUMN_TYPES = {
+    "VARCHAR": {"postgresql": "VARCHAR", "sqlite": "VARCHAR"},
+    "BINARY": {"postgresql": "BYTEA", "sqlite": "BLOB"},
+}
 
 
 async def reconcile_additive_columns() -> None:
     engine = get_engine()
+    dialect = engine.dialect.name
     async with engine.begin() as connection:
 
         def inspect_existing(sync_connection):
@@ -81,12 +90,39 @@ async def reconcile_additive_columns() -> None:
             }
 
         existing = await connection.run_sync(inspect_existing)
-        for table, column, column_type in ADDITIVE_COLUMNS:
+        for table, column, logical_type in ADDITIVE_COLUMNS:
             if table not in existing or column in existing[table]:
                 continue
+            column_type = _COLUMN_TYPES[logical_type].get(dialect, "VARCHAR")
             await connection.execute(
                 text(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
             )
+
+
+async def widen_session_offer_uniqueness() -> None:
+    """Relax `session_offers` from one offer per epoch to one per recipient per epoch.
+
+    This is the schema half of group messaging. The original constraint made the table
+    physically incapable of holding a second recipient, so it has to be replaced rather
+    than added to -- which puts it outside what `reconcile_additive_columns` will touch.
+
+    Only PostgreSQL is altered in place. SQLite cannot drop a constraint without
+    rebuilding the table, and it is only used here for local development and tests, where
+    the schema is created fresh from the model and is already correct.
+    """
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        return
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("ALTER TABLE session_offers DROP CONSTRAINT IF EXISTS uq_channel_epoch_offer")
+        )
+        await connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_epoch_responder_offer "
+                "ON session_offers (channel_id, key_epoch, responder_id)"
+            )
+        )
 
 
 async def ping_database() -> None:

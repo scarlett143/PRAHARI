@@ -91,6 +91,16 @@ export const workspaceApi = {
   addMember: (serverId, username) =>
     post(`/api/v2/servers/${serverId}/members`, { username }),
   createChannel: (body) => post("/api/v2/channels", body),
+  // Group channel: the creator plus everyone named. Three or more members switches the
+  // channel from a pairwise ratchet to a shared epoch key.
+  createGroup: (serverId, name, memberUsernames) =>
+    post("/api/v2/channels", {
+      server_id: serverId,
+      name,
+      member_usernames: memberUsernames,
+    }),
+  addChannelMember: (channelId, username) =>
+    post(`/api/v2/channels/${channelId}/members`, { username }),
   channel: (channelId) => api(`/api/v2/channels/${channelId}`),
   rotateEpoch: (channelId) => post(`/api/v2/channels/${channelId}/rotate-key`),
   messages: (channelId, limit = 100) =>

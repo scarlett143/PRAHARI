@@ -30,7 +30,16 @@ def session_offer_signing_payload(
     responder_id: str,
     x25519_ephemeral_public: bytes,
     ml_kem_ciphertext: bytes,
+    wrapped_group_key: bytes | None = None,
 ) -> bytes:
+    """Bytes the initiator signs over for one recipient's copy of an epoch's key material.
+
+    The wrapped group key is inside the signature, not merely alongside it. Without that
+    the relay could hand one member a wrapped key lifted from a different channel or
+    epoch and they would accept it, since the KEM part would still verify. Appending
+    nothing when it is absent keeps two-party signatures byte-identical to the ones
+    already stored, so existing sessions keep verifying.
+    """
     return (
         SESSION_OFFER_LABEL
         + channel_id.encode("utf-8")
@@ -41,4 +50,5 @@ def session_offer_signing_payload(
         + b"\x00"
         + x25519_ephemeral_public
         + ml_kem_ciphertext
+        + (wrapped_group_key or b"")
     )

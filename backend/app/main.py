@@ -30,6 +30,7 @@ from .database import (
     get_engine,
     ping_database,
     reconcile_additive_columns,
+    widen_session_offer_uniqueness,
 )
 from .realtime import manager
 
@@ -45,6 +46,9 @@ async def lifespan(_: FastAPI):
     # create_all adds tables but never columns, so an upgraded deployment needs this or
     # a new column is missing until someone drops the volume.
     await reconcile_additive_columns()
+    # ...and it never alters constraints either, so the group-messaging widening of
+    # session_offers has to be applied explicitly on an existing database.
+    await widen_session_offer_uniqueness()
     await ping_database()
     yield
     await close_database()

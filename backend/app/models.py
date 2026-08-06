@@ -110,8 +110,27 @@ class Channel(Base):
 
 
 class SessionOffer(Base):
+    """One member's copy of a channel's key material for one epoch.
+
+    Two shapes share this table, distinguished by `wrapped_group_key`:
+
+    - **Two-party (NULL).** The hybrid KEM output *is* the session key, and it seeds a
+      Double Ratchet. One offer per epoch, initiator to responder. Unchanged.
+    - **Group (non-NULL).** The initiator draws one random group key for the epoch and
+      seals it separately to every other member, so there is one row per recipient. The
+      KEM output is a *wrapping* key here, never the message key.
+
+    Hence the uniqueness rule is per recipient rather than per epoch. Widening it is what
+    lets a channel hold more than two people at all -- the old
+    `unique(channel_id, key_epoch)` physically permitted exactly one recipient.
+    """
+
     __tablename__ = "session_offers"
-    __table_args__ = (UniqueConstraint("channel_id", "key_epoch", name="uq_channel_epoch_offer"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_id", "key_epoch", "responder_id", name="uq_channel_epoch_responder_offer"
+        ),
+    )
 
     id = Column(String, primary_key=True, default=_uuid)
     channel_id = Column(String, ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -121,6 +140,9 @@ class SessionOffer(Base):
     x25519_ephemeral_public = Column(LargeBinary(32), nullable=False)
     ml_kem_ciphertext = Column(LargeBinary(1088), nullable=False)
     offer_signature = Column(LargeBinary(64), nullable=False)
+    #: AES-GCM of the epoch's group key under the KEM-derived wrapping key. NULL for
+    #: two-party channels, where no group key exists to wrap.
+    wrapped_group_key = Column(LargeBinary, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

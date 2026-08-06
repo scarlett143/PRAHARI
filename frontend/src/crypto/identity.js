@@ -53,7 +53,21 @@ export function verifyRemoteBundle(bundle) {
 
 const SESSION_OFFER_LABEL = encoder.encode("PRAHARI-SESSION-OFFER-V1\0");
 
-export function sessionOfferPayload({ channelId, epoch, responderId, ephemeralPublic, kemCiphertext }) {
+/**
+ * `wrappedKey` is the group key sealed to this one recipient, and it is signed over
+ * rather than merely sent alongside. Otherwise the relay could hand a member a wrapped
+ * key taken from another channel or epoch and they would accept it -- the KEM half would
+ * still verify. Empty for two-party offers, which keeps their payload byte-identical to
+ * what was signed before groups existed.
+ */
+export function sessionOfferPayload({
+  channelId,
+  epoch,
+  responderId,
+  ephemeralPublic,
+  kemCiphertext,
+  wrappedKey = new Uint8Array(0),
+}) {
   return concatBytes(
     SESSION_OFFER_LABEL,
     encoder.encode(channelId), new Uint8Array([0]),
@@ -61,28 +75,28 @@ export function sessionOfferPayload({ channelId, epoch, responderId, ephemeralPu
     encoder.encode(responderId), new Uint8Array([0]),
     ephemeralPublic,
     kemCiphertext,
+    wrappedKey,
   );
 }
 
+const offerBytes = (offer) => ({
+  channelId: offer.channel_id,
+  epoch: offer.key_epoch,
+  responderId: offer.responder_id,
+  ephemeralPublic: base64ToBytes(offer.x25519_ephemeral_public),
+  kemCiphertext: base64ToBytes(offer.ml_kem_ciphertext),
+  wrappedKey: offer.wrapped_group_key
+    ? base64ToBytes(offer.wrapped_group_key)
+    : new Uint8Array(0),
+});
+
 export function signSessionOffer(identity, offer) {
-  const payload = sessionOfferPayload({
-    channelId: offer.channel_id,
-    epoch: offer.key_epoch,
-    responderId: offer.responder_id,
-    ephemeralPublic: base64ToBytes(offer.x25519_ephemeral_public),
-    kemCiphertext: base64ToBytes(offer.ml_kem_ciphertext),
-  });
+  const payload = sessionOfferPayload(offerBytes(offer));
   return bytesToBase64(ed25519.sign(payload, base64ToBytes(identity.ed25519Secret)));
 }
 
 export function verifySessionOffer(remoteBundle, offer) {
-  const payload = sessionOfferPayload({
-    channelId: offer.channel_id,
-    epoch: offer.key_epoch,
-    responderId: offer.responder_id,
-    ephemeralPublic: base64ToBytes(offer.x25519_ephemeral_public),
-    kemCiphertext: base64ToBytes(offer.ml_kem_ciphertext),
-  });
+  const payload = sessionOfferPayload(offerBytes(offer));
   return ed25519.verify(
     base64ToBytes(offer.offer_signature),
     payload,

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { linkApi, workspaceApi } from "../lib/api.js";
-import { decryptWithRatchet, encryptWithRatchet, openRatchet } from "../crypto/ratchetSession.js";
+import {
+  decryptForChannel,
+  encryptForChannel,
+  isGroupChannel,
+  openChannelSession,
+} from "../crypto/channelCrypto.js";
 import { loadPlaintexts, savePlaintext } from "../storage/keys.js";
 import { Alert, Badge, EmptyState, Field, Panel } from "../components/ui.jsx";
 import Linkify, { LinkCard, extractLinks } from "../components/Linkify.jsx";
@@ -12,8 +17,8 @@ const TYPING_TTL_MS = 4000;
 /** Long enough that a pause for thought is not reported as "stopped typing". */
 const TYPING_IDLE_MS = 2500;
 
-/** Human-to-human secure messaging over the same two-party hybrid session the
- *  aircraft link uses. */
+/** Human-to-human secure messaging over the same hybrid handshake the aircraft link
+ *  uses: a Double Ratchet between two people, a shared epoch key among more. */
 export default function MessagingRoute({ user, identity, socketEvent, socketSend }) {
   const [workspaces, setWorkspaces] = useState([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState("");
@@ -83,7 +88,7 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
         return { ...message, plaintext: known.plaintext, authenticated: known.authenticated };
       }
       try {
-        const plaintext = await decryptWithRatchet(target, user, identity, message);
+        const plaintext = await decryptForChannel(target, user, identity, message);
         await savePlaintext(target.id, message.id, {
           messageId: message.id,
           plaintext,
@@ -123,8 +128,8 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
       setTypingPeers({});
       setSessionStatus({ tone: "neutral", text: "Establishing hybrid session…" });
       try {
-        await openRatchet(details, user, identity);
-        setSessionStatus({ tone: "good", text: "Ratcheting · per-message keys" });
+        const { label } = await openChannelSession(details, user, identity);
+        setSessionStatus({ tone: "good", text: label });
       } catch (caught) {
         setSessionStatus({ tone: "warning", text: caught.message });
       }
@@ -341,7 +346,7 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
     typingSentAt.current = 0;
     signalTyping("stop");
     try {
-      const envelope = await encryptWithRatchet(channel, user, identity, text);
+      const envelope = await encryptForChannel(channel, user, identity, text);
       const created = await workspaceApi.send({
         client_message_id: crypto.randomUUID(),
         channel_id: channel.id,
@@ -465,6 +470,29 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
 
         {activeWorkspace?.owner_id === user.id && (
           <AddPeer workspace={activeWorkspace} onAdded={refreshWorkspaces} />
+        )}
+
+        <NewGroup
+          user={user}
+          links={links}
+          workspaces={workspaces}
+          activeWorkspace={activeWorkspace}
+          onCreated={refreshWorkspaces}
+          onOpen={openChannel}
+        />
+
+        {channel && isGroupChannel(channel) && (
+          <GroupMembers
+            channel={channel}
+            user={user}
+            links={links}
+            workspaces={workspaces}
+            presence={presence}
+            onChanged={async () => {
+              await refreshWorkspaces();
+              await openChannel(channel.id);
+            }}
+          />
         )}
 
         <Panel title="Members">
@@ -619,7 +647,8 @@ function FirstWorkspace({ onCreated, onOpen }) {
       <div className="stack" style={{ maxWidth: "480px" }}>
         <p className="muted">
           Then invite someone with a link, or find them in the directory and request a
-          link. Channels hold exactly two peers, because the hybrid session is two-party.
+          link. Two peers get a Double Ratchet with a key per message; add more and the
+          channel becomes a group sharing one key per epoch.
         </p>
         <Field label="Workspace name" id="workspace-name">
           <input
@@ -650,6 +679,183 @@ function FirstWorkspace({ onCreated, onOpen }) {
           {busy ? "Creating…" : "Create workspace"}
         </button>
       </div>
+    </Panel>
+  );
+}
+
+/** Everyone whose link request was accepted, in either direction. */
+function linkedPeers(links, user) {
+  const accepted = (links.history || []).filter((row) => row.status === "accepted");
+  const names = accepted.map((row) => (row.requester === user.username ? row.target : row.requester));
+  return [...new Set(names)].filter(Boolean).sort();
+}
+
+/**
+ * Create a group channel from linked peers.
+ *
+ * A channel lives inside a workspace and only its owner may add channels, but a link can
+ * land in a workspace owned by either side. So rather than requiring the right workspace
+ * to be selected, this works in one the user owns and pulls the chosen peers into it,
+ * creating that workspace if they do not have one yet.
+ */
+function NewGroup({ user, links, workspaces, activeWorkspace, onCreated, onOpen }) {
+  const [name, setName] = useState("");
+  const [selected, setSelected] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const peers = linkedPeers(links, user);
+  if (peers.length === 0) return null;
+
+  const toggle = (peer) =>
+    setSelected((current) =>
+      current.includes(peer) ? current.filter((row) => row !== peer) : [...current, peer],
+    );
+
+  async function create() {
+    setBusy(true);
+    setError("");
+    try {
+      let workspace =
+        activeWorkspace?.owner_id === user.id
+          ? activeWorkspace
+          : workspaces.find((row) => row.owner_id === user.id);
+      if (!workspace) workspace = await workspaceApi.create("Secure Workspace");
+
+      // Group membership is validated against the workspace, so anyone missing has to
+      // join it first. Already-a-member is not an error worth surfacing.
+      const present = new Set(workspace.members || []);
+      for (const peer of selected) {
+        if (present.has(peer)) continue;
+        await workspaceApi.addMember(workspace.id, peer);
+      }
+
+      const created = await workspaceApi.createGroup(
+        workspace.id,
+        name.trim() || `group-${selected.length + 1}`,
+        selected,
+      );
+      setName("");
+      setSelected([]);
+      await onCreated();
+      await onOpen(created.id);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="New group" eyebrow={`${peers.length} linked`}>
+      <div className="stack">
+        <Field label="Group name" id="group-name">
+          <input
+            id="group-name"
+            className="input"
+            value={name}
+            placeholder="operations"
+            onChange={(changeEvent) => setName(changeEvent.target.value)}
+          />
+        </Field>
+
+        <div className="stack" style={{ gap: "var(--sp-2)" }}>
+          <span className="field__label">Members</span>
+          {peers.map((peer) => (
+            <label key={peer} className="row" style={{ gap: "var(--sp-2)" }}>
+              <input
+                type="checkbox"
+                checked={selected.includes(peer)}
+                onChange={() => toggle(peer)}
+              />
+              <span className="truncate">{peer}</span>
+            </label>
+          ))}
+        </div>
+
+        {selected.length === 1 && (
+          <Alert tone="info">
+            Two people use a Double Ratchet — a key per message. Pick a second peer for a
+            group, which shares one key per epoch instead.
+          </Alert>
+        )}
+        {error && <Alert tone="error">{error}</Alert>}
+
+        <button className="btn btn--primary" disabled={busy || selected.length === 0} onClick={create}>
+          {busy ? "Creating…" : `Create group with ${selected.length || "…"}`}
+        </button>
+      </div>
+    </Panel>
+  );
+}
+
+/** Membership of the open group, plus the control that grows it. */
+function GroupMembers({ channel, user, links, workspaces, presence, onChanged }) {
+  const [adding, setAdding] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const workspace = workspaces.find((row) => row.id === channel.server_id);
+  const owns = workspace?.owner_id === user.id;
+  const present = new Set((channel.members || []).map((member) => member.username));
+  const candidates = linkedPeers(links, user).filter((peer) => !present.has(peer));
+
+  async function add() {
+    setBusy(true);
+    setError("");
+    try {
+      await workspaceApi.addChannelMember(channel.id, adding);
+      setAdding("");
+      await onChanged();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="Group members" eyebrow={`epoch ${channel.key_epoch}`}>
+      <ul className="stack" style={{ gap: "var(--sp-2)" }}>
+        {(channel.members || []).map((member) => (
+          <li key={member.id} className="row" style={{ gap: "var(--sp-2)" }}>
+            <span
+              className={presence[member.id] ? "dot dot--pulse" : "dot"}
+              style={{ color: presence[member.id] ? "var(--good)" : "var(--muted)" }}
+              aria-hidden="true"
+            />
+            <span className="truncate">{member.username}</span>
+            {member.id === user.id && <span className="muted">you</span>}
+            {!member.key_verified && <Badge tone="warning">no keys</Badge>}
+          </li>
+        ))}
+      </ul>
+
+      {owns && candidates.length > 0 && (
+        <div className="stack" style={{ marginTop: "var(--sp-3)" }}>
+          <Field label="Add a linked peer" id="group-add">
+            <select
+              id="group-add"
+              className="select"
+              value={adding}
+              onChange={(changeEvent) => setAdding(changeEvent.target.value)}
+            >
+              <option value="">Choose someone…</option>
+              {candidates.map((peer) => (
+                <option key={peer} value={peer}>{peer}</option>
+              ))}
+            </select>
+          </Field>
+          <p className="muted" style={{ fontSize: "var(--text-xs)" }}>
+            Adding someone rotates the channel to a new epoch. They can read what follows,
+            never the messages already sent.
+          </p>
+          {error && <Alert tone="error">{error}</Alert>}
+          <button className="btn" disabled={!adding || busy} onClick={add}>
+            {busy ? "Adding…" : "Add and re-key"}
+          </button>
+        </div>
+      )}
     </Panel>
   );
 }
