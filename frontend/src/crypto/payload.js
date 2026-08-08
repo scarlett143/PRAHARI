@@ -33,6 +33,7 @@ export const KIND = {
   EDIT: "edit",
   DELETE: "del",
   REACTION: "react",
+  PIN: "pin",
 };
 
 const MAX_BODY = 8000;
@@ -54,6 +55,15 @@ export const deleteMessage = (targetId) => encodePayload({ t: KIND.DELETE, targe
 
 export const reactionEvent = (targetId, emoji, op = "add") =>
   encodePayload({ t: KIND.REACTION, target: targetId, emoji, op });
+
+/**
+ * Pinning is shared state -- everyone in the channel sees the same pins -- which is why
+ * it travels as an envelope rather than living in local preferences like mute or archive.
+ * The relay still cannot tell this from a message: same seal, same shape, different bytes
+ * inside.
+ */
+export const pinEvent = (targetId, op = "add") =>
+  encodePayload({ t: KIND.PIN, target: targetId, op });
 
 /* -- decoding --------------------------------------------------------------- */
 
@@ -97,6 +107,14 @@ export function decodePayload(plaintext) {
         t: KIND.REACTION,
         target: parsed.target,
         emoji: clamp(parsed.emoji, MAX_EMOJI),
+        op: parsed.op === "remove" ? "remove" : "add",
+      };
+
+    case KIND.PIN:
+      if (!isId(parsed.target)) break;
+      return {
+        t: KIND.PIN,
+        target: parsed.target,
         op: parsed.op === "remove" ? "remove" : "add",
       };
 

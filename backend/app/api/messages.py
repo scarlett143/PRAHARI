@@ -110,6 +110,67 @@ async def send_message(
     return payload
 
 
+@router.delete("/messages/{message_id}")
+async def retract_message(
+    message_id: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Drop the stored ciphertext of one's own message.
+
+    This is the server half of a retraction, and it is deliberately the weaker half. The
+    authoritative event is the sealed `del` payload the author publishes on the channel:
+    peers honour that, and they would honour it even if this endpoint were never called or
+    a hostile relay ignored it. What this adds is that the relay stops handing the
+    ciphertext to anyone who asks again -- which matters for a device that has not synced
+    yet, and not at all for one that already decrypted and cached the message.
+
+    Say plainly what it cannot do: a recipient who has already read the message keeps it.
+    No server-side delete can reach a plaintext that only ever existed on someone else's
+    device, and promising otherwise would be the kind of claim this product exists not to
+    make.
+
+    The row itself stays. `content_hash` is a leaf in a published Merkle tree (see
+    `blockchain/`), so removing the row would break every anchor proof issued for that
+    batch -- including proofs about *other* people's messages that happen to share it.
+    Emptying the envelope removes the content; keeping the hash preserves the proof that
+    something stood there and was later withdrawn.
+    """
+    message = await db.get(Message, message_id)
+    # A missing row and someone else's row are answered identically: a probe must not be
+    # able to map which message ids exist by watching the status code change.
+    if message is None or message.sender_id != user.id:
+        raise HTTPException(404, "message not found")
+    await require_channel_member(db, message.channel_id, user)
+
+    if message.deleted_at is None:
+        message.envelope = b""
+        message.deleted_at = datetime.now(timezone.utc)
+        await audit(
+            db,
+            event="message.deleted",
+            actor_id=user.id,
+            request=request,
+            detail=f"channel={message.channel_id};message={message.id}",
+        )
+        await db.commit()
+        await db.refresh(message)
+
+        members = await channel_member_users(db, message.channel_id)
+        await manager.notify_users(
+            [member.id for member in members],
+            {
+                "type": "message.deleted",
+                "channel_id": message.channel_id,
+                "message_id": message.id,
+                "deleted_at": jsonable_encoder(message.deleted_at),
+            },
+        )
+    # Idempotent: deleting twice is a retry, not an error.
+    return {"id": message.id, "deleted_at": message.deleted_at}
+
+
 class ReceiptRequest(BaseModel):
     channel_id: str
     message_ids: list[str] = Field(min_length=1, max_length=200)
@@ -258,4 +319,5 @@ def _serialize(message: Message, username: str) -> dict:
         "content_hash": message.content_hash.hex(),
         "anchor_batch_id": message.anchor_batch_id,
         "created_at": message.created_at,
+        "deleted_at": message.deleted_at,
     }

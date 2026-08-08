@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authApi, linkApi, workspaceApi } from "../lib/api.js";
 import { verifyRemoteBundle } from "../crypto/identity.js";
 import { formatForDisplay, identityFingerprint, safetyNumber } from "../crypto/verification.js";
+import { verifyKeyHistory } from "../crypto/transparency.js";
 import { markPeerVerified, reconcilePeerTrust } from "../storage/keys.js";
 import {
   decryptForChannel,
@@ -10,6 +11,29 @@ import {
   openChannelSession,
 } from "../crypto/channelCrypto.js";
 import { loadPlaintexts, savePlaintext } from "../storage/keys.js";
+import {
+  decodePayload,
+  deleteMessage as deletePayload,
+  editMessage as editPayload,
+  pinEvent,
+  reactionEvent,
+  textMessage,
+} from "../crypto/payload.js";
+import { buildTranscript, mentionsUser, quoteFor } from "../lib/conversation.js";
+import {
+  assignFolder,
+  bumpUnread,
+  clearUnread,
+  folderOf,
+  isSaved,
+  loadPrefs,
+  saveMessage,
+  setDraft as setDraftPref,
+  toggleArchived,
+  toggleMuted,
+  unsaveMessage,
+  updatePrefs,
+} from "../storage/prefs.js";
 import { Alert, Badge, EmptyState, Field, Panel } from "../components/ui.jsx";
 import Linkify, { LinkCard, extractLinks } from "../components/Linkify.jsx";
 import { InvitePanel, LinkRequests, PeerDirectory } from "../components/DirectoryPanel.jsx";
@@ -20,6 +44,10 @@ const TYPING_TTL_MS = 4000;
 /** Long enough that a pause for thought is not reported as "stopped typing". */
 const TYPING_IDLE_MS = 2500;
 
+/** Offered inline on every message. Any emoji is valid on the wire -- these are only the
+ *  ones reachable without a picker, which Stage 2 does not have yet. */
+const QUICK_REACTIONS = ["👍", "✅", "❓", "🙏"];
+
 /** Human-to-human secure messaging over the same hybrid handshake the aircraft link
  *  uses: a Double Ratchet between two people, a shared epoch key among more. */
 export default function MessagingRoute({ user, identity, socketEvent, socketSend }) {
@@ -27,6 +55,11 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
   const [activeWorkspaceId, setActiveWorkspaceId] = useState("");
   const [channel, setChannel] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [replyTo, setReplyTo] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [prefs, setPrefs] = useState(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const [showSaved, setShowSaved] = useState(false);
   const [draft, setDraft] = useState("");
   const [sessionStatus, setSessionStatus] = useState({ tone: "neutral", text: "No channel open" });
   const [error, setError] = useState("");
@@ -41,8 +74,23 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
   const acknowledged = useRef(new Set());
   const typingSentAt = useRef(0);
   const typingStopTimer = useRef(null);
+  const draftSaveTimer = useRef(null);
 
   channelRef.current = channel;
+
+  // Events are stored in arrival order; this is where they become a conversation.
+  const transcript = useMemo(() => buildTranscript(messages), [messages]);
+  const pinned = useMemo(() => transcript.filter((item) => item.pinned), [transcript]);
+
+  /** Persist a preference change and reflect it immediately. */
+  const editPrefs = useCallback(
+    (mutate) => updatePrefs(user.username, mutate).then(setPrefs),
+    [user.username],
+  );
+
+  useEffect(() => {
+    loadPrefs(user.username).then(setPrefs);
+  }, [user.username]);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((item) => item.id === activeWorkspaceId) || workspaces[0] || null,
@@ -86,9 +134,20 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
    */
   const decode = useCallback(
     async (message, target, cache) => {
+      // The relay blanks the envelope of a retracted message, so there is nothing to
+      // decrypt and trying would surface a decryption failure where a deliberate
+      // withdrawal happened. `buildTranscript` renders the tombstone from `deleted_at`.
+      if (message.deleted_at) {
+        return { ...message, plaintext: "", payload: { t: "msg", body: "" }, authenticated: true };
+      }
       const known = cache?.get(message.id);
       if (known) {
-        return { ...message, plaintext: known.plaintext, authenticated: known.authenticated };
+        return {
+          ...message,
+          plaintext: known.plaintext,
+          payload: decodePayload(known.plaintext),
+          authenticated: known.authenticated,
+        };
       }
       try {
         const plaintext = await decryptForChannel(target, user, identity, message);
@@ -97,11 +156,18 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
           plaintext,
           authenticated: true,
         });
-        return { ...message, plaintext, authenticated: true };
+        return { ...message, plaintext, payload: decodePayload(plaintext), authenticated: true };
       } catch (caught) {
         // Deliberately not cached: a failure here can be transient (the peer has not
         // published their offer yet), and storing it would make it permanent.
-        return { ...message, plaintext: caught.message, authenticated: false };
+        // An undecryptable row still occupies a place in the transcript, so it needs a
+        // payload shape -- with the failure as its body.
+        return {
+          ...message,
+          plaintext: caught.message,
+          payload: { t: "msg", body: caught.message },
+          authenticated: false,
+        };
       }
     },
     [user, identity],
@@ -129,6 +195,16 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
       const details = await workspaceApi.channel(channelId);
       setChannel(details);
       setTypingPeers({});
+      setReplyTo(null);
+      setEditing(null);
+      // Opening a channel is what marks it read, and it restores whatever was half-typed
+      // here last time. The draft is per channel, so switching away mid-sentence and
+      // coming back does not lose the sentence.
+      const stored = await updatePrefs(user.username, (draftPrefs) =>
+        clearUnread(draftPrefs, channelId),
+      );
+      setPrefs(stored);
+      setDraft(stored.drafts[channelId] ?? "");
       setSessionStatus({ tone: "neutral", text: "Establishing hybrid session…" });
       try {
         const { label } = await openChannelSession(details, user, identity);
@@ -181,8 +257,22 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
         break;
 
       case "message.created": {
-        if (!current || socketEvent.channel_id !== current.id) break;
         const incoming = socketEvent.message;
+
+        // A message for a channel we are not looking at only raises a badge. Counting it
+        // costs nothing extra -- the relay already fans this frame out to every member,
+        // so the alternative would be polling every channel for something we were just
+        // told. The envelope is deliberately left sealed: decrypting ahead of time to
+        // check for a mention would consume ratchet chain keys belonging to messages this
+        // device has not displayed yet, so an unopened channel's badge counts messages,
+        // never mentions.
+        if (socketEvent.channel_id !== current?.id) {
+          if (incoming.sender_id !== user.id) {
+            editPrefs((draftPrefs) => bumpUnread(draftPrefs, socketEvent.channel_id));
+          }
+          break;
+        }
+        if (!current) break;
         // Append rather than refetch: the envelope is already in the frame, so the
         // message renders without a round trip and without re-running the handshake.
         //
@@ -201,6 +291,22 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
           delete next[incoming.sender_id];
           return next;
         });
+        break;
+      }
+
+      case "message.deleted": {
+        if (!current || socketEvent.channel_id !== current.id) break;
+        // Mirrors what the relay just did to its own copy. The author's sealed `del`
+        // event arrives separately as an ordinary message and is what actually decides
+        // this; acting on the notice too simply means the tombstone appears at once
+        // rather than after the next reload.
+        setMessages((prev) =>
+          prev.map((item) =>
+            item.id === socketEvent.message_id
+              ? { ...item, deleted_at: socketEvent.deleted_at }
+              : item,
+          ),
+        );
         break;
       }
 
@@ -269,7 +375,7 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
       default:
         break;
     }
-  }, [socketEvent, decode, openChannel, refreshWorkspaces, refreshLinks, refreshPresence]);
+  }, [socketEvent, decode, openChannel, refreshWorkspaces, refreshLinks, refreshPresence, editPrefs, user.id]);
 
   /* Typing notices expire locally, so a peer that drops mid-sentence does not leave a
      permanent "is typing…" behind. */
@@ -338,7 +444,114 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
       typingSentAt.current = 0;
       signalTyping("stop");
     }, TYPING_IDLE_MS);
+
+    // Persisted on the same idle timer as the typing notice rather than per keystroke:
+    // a draft only has to survive closing the tab, and writing to IndexedDB on every
+    // character is work nobody asked for.
+    clearTimeout(draftSaveTimer.current);
+    draftSaveTimer.current = setTimeout(() => {
+      editPrefs((draftPrefs) => setDraftPref(draftPrefs, channel.id, value));
+    }, TYPING_IDLE_MS);
   }
+
+  /**
+   * Seal one payload and put it on the channel.
+   *
+   * Every verb goes through here -- a message, an edit, a retraction, a reaction. They
+   * are indistinguishable on the wire precisely because they take the same path.
+   */
+  async function emit(payloadText) {
+    const envelope = await encryptForChannel(channel, user, identity, payloadText);
+    const created = await workspaceApi.send({
+      client_message_id: crypto.randomUUID(),
+      channel_id: channel.id,
+      key_epoch: channel.key_epoch,
+      envelope_b64: envelope,
+    });
+    // Our own plaintext is stored, not re-derived: the sending key is gone the instant
+    // it is used, so this is the only copy this device will ever have.
+    await savePlaintext(channel.id, created.id, {
+      messageId: created.id,
+      plaintext: payloadText,
+      authenticated: true,
+    });
+    // Render immediately; the echoed socket frame is de-duplicated by id, so this is not
+    // a race with the fan-out.
+    setMessages((prev) =>
+      prev.some((item) => item.id === created.id)
+        ? prev
+        : [
+            ...prev,
+            {
+              ...created,
+              plaintext: payloadText,
+              payload: decodePayload(payloadText),
+              authenticated: true,
+              receipt: null,
+            },
+          ],
+    );
+    return created;
+  }
+
+  async function act(run) {
+    if (!channel) return;
+    setError("");
+    setBusy(true);
+    try {
+      await run();
+    } catch (caught) {
+      setError(
+        caught.code === "rekey_required"
+          ? "This epoch reached its rotation limit. Rotate the epoch and try again."
+          : caught.message,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const toggleReaction = (messageId, emoji, mine) =>
+    act(() => emit(reactionEvent(messageId, emoji, mine ? "remove" : "add")));
+
+  const submitEdit = (messageId, body) =>
+    act(async () => {
+      await emit(editPayload(messageId, body));
+      setEditing(null);
+    });
+
+  const retract = (messageId) =>
+    act(async () => {
+      await emit(deletePayload(messageId));
+      // Tell the relay to drop the stored ciphertext too. The event above is what other
+      // clients honour; this is what stops the server handing the message out again.
+      await workspaceApi.deleteMessage(messageId).catch(() => {});
+    });
+
+  const togglePin = (messageId, currentlyPinned) =>
+    act(() => emit(pinEvent(messageId, currentlyPinned ? "remove" : "add")));
+
+  /**
+   * Keep a copy of one message under this account, on this device.
+   *
+   * The body is copied out rather than referenced. A saved message has to survive the
+   * thing it points at: the author can retract the original at any time, and after a
+   * ratchet step the envelope cannot be decrypted a second time regardless. A reference
+   * would quietly become an empty row.
+   */
+  const toggleSaved = (message) =>
+    editPrefs((draftPrefs) =>
+      isSaved(draftPrefs, message.id)
+        ? unsaveMessage(draftPrefs, message.id)
+        : saveMessage(draftPrefs, {
+            id: message.id,
+            channelId: channel.id,
+            channelName: channel.name,
+            sender: message.sender_name,
+            body: message.body,
+            createdAt: message.created_at,
+          }),
+    );
 
   async function send() {
     const text = draft.trim();
@@ -346,31 +559,15 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
     setError("");
     setBusy(true);
     clearTimeout(typingStopTimer.current);
+    clearTimeout(draftSaveTimer.current);
     typingSentAt.current = 0;
     signalTyping("stop");
     try {
-      const envelope = await encryptForChannel(channel, user, identity, text);
-      const created = await workspaceApi.send({
-        client_message_id: crypto.randomUUID(),
-        channel_id: channel.id,
-        key_epoch: channel.key_epoch,
-        envelope_b64: envelope,
-      });
+      await emit(textMessage(text, replyTo?.id ?? null));
       setDraft("");
-      // Our own plaintext is stored, not re-derived: the sending key is gone the instant
-      // it is used, so this is the only copy this device will ever have.
-      await savePlaintext(channel.id, created.id, {
-        messageId: created.id,
-        plaintext: text,
-        authenticated: true,
-      });
-      // Render our own message immediately; the echoed socket frame is de-duplicated by
-      // id, so this is not a race with the fan-out.
-      setMessages((prev) =>
-        prev.some((item) => item.id === created.id)
-          ? prev
-          : [...prev, { ...created, plaintext: text, authenticated: true, receipt: null }],
-      );
+      setReplyTo(null);
+      // A sent draft is no longer a draft.
+      editPrefs((draftPrefs) => setDraftPref(draftPrefs, channel.id, ""));
     } catch (caught) {
       if (caught.code === "rekey_required") {
         setError("This epoch reached its rotation limit. Rotate the epoch and send again.");
@@ -434,22 +631,17 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
               ))}
             </select>
 
-            <div>
-              <div className="eyebrow">Channels</div>
-              <div className="rail__nav" style={{ marginTop: "var(--sp-2)" }}>
-                {activeWorkspace?.channels.map((item) => (
-                  <button
-                    key={item.id}
-                    className={item.id === channel?.id ? "nav-item nav-item--active" : "nav-item"}
-                    onClick={() => openChannel(item.id).catch((c) => setError(c.message))}
-                  >
-                    <span aria-hidden="true">#</span>
-                    <span className="truncate">{item.name}</span>
-                    <span className="nav-item__count">E{item.key_epoch}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
+            <ChannelList
+              channels={activeWorkspace?.channels ?? []}
+              activeId={channel?.id}
+              prefs={prefs}
+              showArchived={showArchived}
+              onToggleArchivedView={() => setShowArchived((value) => !value)}
+              onOpen={(id) => openChannel(id).catch((c) => setError(c.message))}
+              onToggleMute={(id) => editPrefs((p) => toggleMuted(p, id))}
+              onToggleArchive={(id) => editPrefs((p) => toggleArchived(p, id))}
+              onSetFolder={(id, folder) => editPrefs((p) => assignFolder(p, id, folder))}
+            />
           </div>
         </Panel>
 
@@ -536,6 +728,13 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
             <Badge tone={sessionStatus.tone}>{sessionStatus.text}</Badge>
             <button
               className="btn btn--sm"
+              onClick={() => setShowSaved((value) => !value)}
+              aria-pressed={showSaved}
+            >
+              {showSaved ? "Back to channel" : `Saved (${prefs?.saved.length ?? 0})`}
+            </button>
+            <button
+              className="btn btn--sm"
               disabled={!channel}
               onClick={async () => {
                 try {
@@ -552,10 +751,45 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
           </div>
         </header>
 
-        <div className="chat__log" ref={logRef}>
-          {messages.map((message) => {
+        {showSaved && (
+          <SavedMessages
+            saved={prefs?.saved ?? []}
+            onRemove={(id) => editPrefs((p) => unsaveMessage(p, id))}
+          />
+        )}
+
+        {!showSaved && pinned.length > 0 && (
+          <div className="pinned-bar reveal">
+            <span className="eyebrow" aria-hidden="true">📌 Pinned</span>
+            <ul className="stack" style={{ gap: "var(--sp-1)" }}>
+              {pinned.map((item) => (
+                <li key={item.id} className="row row--between" style={{ gap: "var(--sp-3)" }}>
+                  <span className="truncate">
+                    <strong>{item.sender_name}</strong> {item.body}
+                  </span>
+                  <button
+                    className="link-btn"
+                    disabled={busy}
+                    onClick={() => togglePin(item.id, true)}
+                  >
+                    Unpin
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="chat__log" ref={logRef} hidden={showSaved}>
+          {transcript.map((message) => {
             const mine = message.sender_id === user.id;
-            const messageLinks = message.authenticated ? extractLinks(message.plaintext) : [];
+            const messageLinks =
+              message.authenticated && !message.deleted ? extractLinks(message.body) : [];
+            const quote = message.replyTo ? quoteFor(transcript, message.replyTo) : null;
+            // Mentions are found here, after decryption, because the relay only ever held
+            // ciphertext -- there is no server-side mention index to consult.
+            const mentioned =
+              !message.deleted && !mine && mentionsUser(message.body, user.username);
             return (
               <article
                 key={message.id}
@@ -563,29 +797,127 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
                   "message",
                   mine ? "message--mine" : "",
                   message.authenticated ? "" : "message--unauthenticated",
+                  message.deleted ? "message--deleted" : "",
+                  mentioned ? "message--mentioned" : "",
+                  message.pinned ? "message--pinned" : "",
                 ].filter(Boolean).join(" ")}
               >
                 <div className="message__meta">
                   <strong>{message.sender_name}</strong>
                   <span>epoch {message.key_epoch}</span>
                   <span>{clockTime(message.created_at)}</span>
+                  {message.editedAt && <span title="Edited by its author">edited</span>}
+                  {message.pinned && (
+                    <span title={`Pinned by ${message.pinnedBy ?? "a member"}`}>📌 pinned</span>
+                  )}
+                  {mentioned && <Badge tone="accent">mentions you</Badge>}
                   {message.authenticated ? (
                     <Badge tone="good">authenticated</Badge>
                   ) : (
                     <Badge tone="critical">not authenticated</Badge>
                   )}
-                  {mine && <ReceiptMark receipt={message.receipt} />}
+                  {mine && !message.deleted && <ReceiptMark receipt={message.receipt} />}
                 </div>
-                <p className="message__body">
-                  {message.authenticated ? <Linkify text={message.plaintext} /> : message.plaintext}
-                </p>
+
+                {quote && (
+                  <div className="message__quote">
+                    <strong>{quote.sender}</strong>
+                    <span className={quote.missing ? "muted" : undefined}>{quote.body}</span>
+                  </div>
+                )}
+
+                {message.deleted ? (
+                  <p className="message__body muted">Message deleted</p>
+                ) : editing === message.id ? (
+                  <EditBox
+                    initial={message.body}
+                    busy={busy}
+                    onCancel={() => setEditing(null)}
+                    onSave={(body) => submitEdit(message.id, body)}
+                  />
+                ) : (
+                  <p className="message__body">
+                    {message.authenticated ? <Linkify text={message.body} /> : message.body}
+                  </p>
+                )}
+
                 {messageLinks.map((url) => (
                   <LinkCard key={url.href} url={url} />
                 ))}
+
+                {message.reactions.length > 0 && (
+                  <div className="chips" style={{ marginTop: "var(--sp-2)" }}>
+                    {message.reactions.map((entry) => (
+                      <button
+                        key={entry.emoji}
+                        type="button"
+                        className={entry.people.includes(user.id) ? "chip chip--active" : "chip"}
+                        onClick={() =>
+                          toggleReaction(message.id, entry.emoji, entry.people.includes(user.id))
+                        }
+                      >
+                        {entry.emoji} {entry.count}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {!message.deleted && message.authenticated && (
+                  <div className="message__actions">
+                    {QUICK_REACTIONS.map((emoji) => (
+                      <button
+                        key={emoji}
+                        type="button"
+                        className="link-btn"
+                        title={`React ${emoji}`}
+                        onClick={() =>
+                          toggleReaction(
+                            message.id,
+                            emoji,
+                            message.reactions.some(
+                              (entry) => entry.emoji === emoji && entry.people.includes(user.id),
+                            ),
+                          )
+                        }
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                    <button type="button" className="link-btn" onClick={() => setReplyTo(message)}>
+                      Reply
+                    </button>
+                    <button
+                      type="button"
+                      className="link-btn"
+                      disabled={busy}
+                      onClick={() => togglePin(message.id, message.pinned)}
+                    >
+                      {message.pinned ? "Unpin" : "Pin"}
+                    </button>
+                    <button
+                      type="button"
+                      className="link-btn"
+                      title="Keep a copy on this device"
+                      onClick={() => toggleSaved(message)}
+                    >
+                      {prefs && isSaved(prefs, message.id) ? "Unsave" : "Save"}
+                    </button>
+                    {mine && (
+                      <>
+                        <button type="button" className="link-btn" onClick={() => setEditing(message.id)}>
+                          Edit
+                        </button>
+                        <button type="button" className="link-btn" onClick={() => retract(message.id)}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
               </article>
             );
           })}
-          {!messages.length && (
+          {!transcript.length && (
             <EmptyState title="No messages yet">
               Everything sent here is encrypted in your browser before upload.
             </EmptyState>
@@ -604,6 +936,18 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
         {error && (
           <div style={{ padding: "0 var(--sp-4)" }}>
             <Alert tone="error">{error}</Alert>
+          </div>
+        )}
+
+        {replyTo && (
+          <div className="composer__reply reveal--up">
+            <div>
+              <strong>Replying to {replyTo.sender_name}</strong>
+              <span className="muted">{quoteFor(transcript, replyTo.id)?.body ?? ""}</span>
+            </div>
+            <button type="button" className="link-btn" onClick={() => setReplyTo(null)}>
+              Cancel
+            </button>
           </div>
         )}
 
@@ -627,6 +971,244 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
           </button>
         </div>
       </section>
+    </div>
+  );
+}
+
+/**
+ * Messages kept under this account, across channels.
+ *
+ * Each entry is a copy made at the moment it was saved, not a pointer. That is forced by
+ * the ratchet: a message key is destroyed on use, so the original envelope cannot simply
+ * be decrypted again later, and the author may retract it in the meantime. Saving stores
+ * what you could read when you saved it.
+ */
+function SavedMessages({ saved, onRemove }) {
+  if (!saved.length) {
+    return (
+      <div className="chat__log">
+        <EmptyState title="Nothing saved">
+          Use <strong>Save</strong> on any message to keep a copy here. Saved messages live
+          in this browser only — they are never uploaded.
+        </EmptyState>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chat__log">
+      {saved.map((item) => (
+        <article key={item.id} className="message">
+          <div className="message__meta">
+            <strong>{item.sender}</strong>
+            <span># {item.channelName}</span>
+            <span>{clockTime(item.createdAt)}</span>
+            <button
+              type="button"
+              className="link-btn"
+              style={{ marginLeft: "auto" }}
+              onClick={() => onRemove(item.id)}
+            >
+              Remove
+            </button>
+          </div>
+          <p className="message__body">{item.body}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Channels, grouped by the folders this device has filed them into.
+ *
+ * Muted, archived and foldered are all local preferences (see storage/prefs.js), so none
+ * of this arrangement is visible to the relay -- it never learns which conversations the
+ * operator cares about.
+ */
+function ChannelList({
+  channels,
+  activeId,
+  prefs,
+  showArchived,
+  onToggleArchivedView,
+  onOpen,
+  onToggleMute,
+  onToggleArchive,
+  onSetFolder,
+}) {
+  const [managing, setManaging] = useState(null);
+  const muted = prefs?.muted ?? {};
+  const archived = prefs?.archived ?? {};
+  const unread = prefs?.unread ?? {};
+
+  const visible = channels.filter((item) => Boolean(archived[item.id]) === showArchived);
+  const archivedCount = channels.filter((item) => archived[item.id]).length;
+
+  // Grouped into folders, with everything unfiled last under a blank heading. Sorted so
+  // the sidebar does not reshuffle as folders are added.
+  const groups = new Map();
+  for (const item of visible) {
+    const folder = prefs ? folderOf(prefs, item.id) : "";
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(item);
+  }
+  const ordered = [...groups.entries()].sort(([left], [right]) => {
+    if (!left) return 1;
+    if (!right) return -1;
+    return left.localeCompare(right);
+  });
+
+  const knownFolders = [...new Set(Object.keys(prefs?.folders ?? {}))].sort();
+
+  return (
+    <div>
+      <div className="row row--between">
+        <div className="eyebrow">{showArchived ? "Archived" : "Channels"}</div>
+        {(archivedCount > 0 || showArchived) && (
+          <button className="link-btn" onClick={onToggleArchivedView}>
+            {showArchived ? "Back to channels" : `Archived (${archivedCount})`}
+          </button>
+        )}
+      </div>
+
+      {!visible.length && (
+        <p className="subtle" style={{ marginTop: "var(--sp-2)" }}>
+          {showArchived ? "Nothing archived." : "No channels here."}
+        </p>
+      )}
+
+      {ordered.map(([folder, items]) => (
+        <div key={folder || "__unfiled"} style={{ marginTop: "var(--sp-3)" }}>
+          {folder && <div className="eyebrow subtle">{folder}</div>}
+          <div className="rail__nav" style={{ marginTop: "var(--sp-2)" }}>
+            {items.map((item) => {
+              const badge = unread[item.id];
+              const isMuted = Boolean(muted[item.id]);
+              return (
+                <div key={item.id}>
+                  <button
+                    className={item.id === activeId ? "nav-item nav-item--active" : "nav-item"}
+                    onClick={() => onOpen(item.id)}
+                  >
+                    <span aria-hidden="true">#</span>
+                    <span className="truncate">{item.name}</span>
+                    {isMuted && (
+                      <span className="subtle" title="Muted" aria-label="Muted">
+                        ⊘
+                      </span>
+                    )}
+                    {prefs?.drafts?.[item.id] && (
+                      <span className="subtle" title="Unsent draft" aria-label="Unsent draft">
+                        ✎
+                      </span>
+                    )}
+                    {/* A muted channel still counts, it simply does not shout: the number
+                        is shown quietly rather than as an unread badge. */}
+                    {badge?.count > 0 && (
+                      <span
+                        className={isMuted ? "nav-item__count" : "badge badge--accent"}
+                        style={{ marginLeft: "auto" }}
+                      >
+                        {badge.count}
+                        {badge.mentions > 0 && " @"}
+                      </span>
+                    )}
+                    {!badge?.count && <span className="nav-item__count">E{item.key_epoch}</span>}
+                  </button>
+
+                  {managing === item.id ? (
+                    <div className="stack reveal" style={{ gap: "var(--sp-2)", padding: "var(--sp-2)" }}>
+                      <input
+                        className="input"
+                        list="prahari-folders"
+                        placeholder="Folder name (blank to unfile)"
+                        aria-label={`Folder for ${item.name}`}
+                        defaultValue={prefs ? folderOf(prefs, item.id) : ""}
+                        onKeyDown={(keyEvent) => {
+                          if (keyEvent.key !== "Enter") return;
+                          onSetFolder(item.id, keyEvent.currentTarget.value.trim());
+                          setManaging(null);
+                        }}
+                      />
+                      <div className="row" style={{ gap: "var(--sp-2)" }}>
+                        <button className="link-btn" onClick={() => onToggleMute(item.id)}>
+                          {isMuted ? "Unmute" : "Mute"}
+                        </button>
+                        <button className="link-btn" onClick={() => onToggleArchive(item.id)}>
+                          {archived[item.id] ? "Unarchive" : "Archive"}
+                        </button>
+                        <button className="link-btn" onClick={() => setManaging(null)}>
+                          Done
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      className="link-btn"
+                      style={{ paddingLeft: "var(--sp-3)" }}
+                      onClick={() => setManaging(item.id)}
+                    >
+                      Options
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      <datalist id="prahari-folders">
+        {knownFolders.map((name) => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+/**
+ * Rewrite one message in place.
+ *
+ * Saving publishes a new sealed event rather than altering the original, which is the
+ * only thing a blind relay could support: the first envelope stays exactly as it was
+ * stored and anchored, and readers apply the edit on top of it. "Edited" is therefore an
+ * honest label -- the earlier text existed and was delivered.
+ */
+function EditBox({ initial, busy, onSave, onCancel }) {
+  const [value, setValue] = useState(initial);
+  const unchanged = value.trim() === initial.trim();
+
+  return (
+    <div className="stack" style={{ gap: "var(--sp-2)" }}>
+      <textarea
+        className="textarea"
+        value={value}
+        aria-label="Edit message"
+        autoFocus
+        onChange={(changeEvent) => setValue(changeEvent.target.value)}
+        onKeyDown={(keyEvent) => {
+          if (keyEvent.key === "Escape") onCancel();
+          if (keyEvent.key === "Enter" && !keyEvent.shiftKey) {
+            keyEvent.preventDefault();
+            if (value.trim() && !unchanged) onSave(value.trim());
+          }
+        }}
+      />
+      <div className="row" style={{ gap: "var(--sp-2)" }}>
+        <button
+          type="button"
+          className="btn btn--primary"
+          disabled={busy || !value.trim() || unchanged}
+          onClick={() => onSave(value.trim())}
+        >
+          {busy ? "Encrypting…" : "Save"}
+        </button>
+        <button type="button" className="link-btn" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
@@ -732,10 +1314,24 @@ function PeerVerification({ channel, user, identity }) {
           }
           const fingerprint = identityFingerprint(bundle);
           const { state, record } = await reconcilePeerTrust(peer.username, fingerprint);
+
+          // Recomputed here, never taken on the relay's word. This answers a different
+          // question from the fingerprint above: the fingerprint says whether the key
+          // changed, the chain says whether the *record* of that key has been rewritten.
+          let transparency = null;
+          try {
+            transparency = await verifyKeyHistory(await authApi.keyHistory(peer.username));
+          } catch {
+            // A history the relay will not serve is not proof of tampering, and refusing
+            // to render the channel over it would make the feature a denial-of-service.
+            transparency = { ok: false, reason: "History unavailable", unavailable: true };
+          }
+
           collected.push({
             username: peer.username,
             state,
             record,
+            transparency,
             number: safetyNumber(localBundle, bundle),
           });
         } catch (caught) {
@@ -776,15 +1372,24 @@ function PeerVerification({ channel, user, identity }) {
               >
                 {row.username}
               </button>
-              {row.error ? (
-                <Badge tone="critical">error</Badge>
-              ) : row.state === "changed" ? (
-                <Badge tone="critical">keys changed</Badge>
-              ) : row.record?.verifiedAt ? (
-                <Badge tone="good">verified</Badge>
-              ) : (
-                <Badge tone="warning">unverified</Badge>
-              )}
+              <span className="row" style={{ gap: "var(--sp-2)" }}>
+                {/* A rewritten history outranks every other state here: it says the
+                    record itself is untrustworthy, so "verified" would be a lie. */}
+                {row.transparency && !row.transparency.ok && !row.transparency.unavailable && (
+                  <Badge tone="critical" title={row.transparency.reason}>
+                    history broken
+                  </Badge>
+                )}
+                {row.error ? (
+                  <Badge tone="critical">error</Badge>
+                ) : row.state === "changed" ? (
+                  <Badge tone="critical">keys changed</Badge>
+                ) : row.record?.verifiedAt ? (
+                  <Badge tone="good">verified</Badge>
+                ) : (
+                  <Badge tone="warning">unverified</Badge>
+                )}
+              </span>
             </div>
 
             {expanded === row.username && (
@@ -800,6 +1405,24 @@ function PeerVerification({ channel, user, identity }) {
                     <pre className="safety">
                       {formatForDisplay(row.number).join("\n")}
                     </pre>
+
+                    {row.transparency && !row.transparency.ok && !row.transparency.unavailable ? (
+                      <Alert tone="error" title="This account's key history does not add up">
+                        {row.transparency.reason} Every published key commits to the one
+                        before it, so this cannot happen by accident — the record has been
+                        changed since it was written. Do not trust the number above until
+                        you have confirmed it with {row.username} directly.
+                      </Alert>
+                    ) : row.transparency?.ok ? (
+                      <p className="subtle">
+                        Key history checks out in this browser:{" "}
+                        {row.transparency.changes === 0
+                          ? "this is the only key they have ever published."
+                          : `${row.transparency.changes} key change${
+                              row.transparency.changes === 1 ? "" : "s"
+                            } on record, none of them since rewritten.`}
+                      </p>
+                    ) : null}
                     {row.record?.verifiedAt ? (
                       <p className="subtle">
                         Verified {new Date(row.record.verifiedAt).toLocaleDateString()}.
