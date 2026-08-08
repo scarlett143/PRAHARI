@@ -30,11 +30,14 @@ const BADGE_TONES = {
  * Status is never carried by colour alone: every tone ships a glyph and the
  * label text, so the meaning survives greyscale, CVD, and forced-colors mode.
  */
-export function Badge({ tone = "neutral", children, glyph }) {
+export function Badge({ tone = "neutral", children, glyph, title }) {
   const spec = BADGE_TONES[tone] ?? BADGE_TONES.neutral;
   const mark = glyph ?? spec.glyph;
   return (
-    <span className={spec.className}>
+    // `title` carries supporting detail that would not fit in the badge itself -- a
+    // containment reason, say. It is supplementary by design: the badge text alone still
+    // says what the state is, since a tooltip is unreachable on touch.
+    <span className={spec.className} title={title}>
       {mark && <span aria-hidden="true">{mark}</span>}
       {children}
     </span>

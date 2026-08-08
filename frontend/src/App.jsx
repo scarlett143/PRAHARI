@@ -6,6 +6,7 @@ import { isLocked } from "./crypto/keylock.js";
 import { publishKeyBundle } from "./crypto/publish.js";
 import UnlockRoute from "./routes/UnlockRoute.jsx";
 import { Badge, Mark, Spinner } from "./components/ui.jsx";
+import GooeyNav from "./components/GooeyNav.jsx";
 import AuthRoute from "./routes/AuthRoute.jsx";
 import JoinRoute from "./routes/JoinRoute.jsx";
 import MessagingRoute from "./routes/MessagingRoute.jsx";
@@ -39,7 +40,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [identity, setIdentity] = useState(null);
   const [lockedRecord, setLockedRecord] = useState(null);
-  // True once we know this device's record is sealed, so the rail can offer to re-seal it.
+  // True once we know this device's record is sealed, so the masthead can offer to re-seal it.
   const [lockable, setLockable] = useState(false);
   const [view, setView] = useState("messaging");
   const [consoleTarget, setConsoleTarget] = useState(null);
@@ -176,8 +177,8 @@ export default function App() {
     <div className="app-shell">
       <a className="skip-link" href="#main">Skip to content</a>
 
-      <aside className="rail">
-        <div className="rail__brand">
+      <header className="masthead">
+        <div className="masthead__brand">
           <Mark />
           <div>
             <strong>PRAHARI</strong>
@@ -185,52 +186,45 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="rail__nav" aria-label="Primary">
-          {VIEWS.map((item) => (
-            <button
-              key={item.id}
-              className={!consoleTarget && view === item.id ? "nav-item nav-item--active" : "nav-item"}
-              aria-current={!consoleTarget && view === item.id ? "page" : undefined}
-              onClick={() => {
-                setConsoleTarget(null);
-                setView(item.id);
-              }}
-            >
-              <span aria-hidden="true">{item.glyph}</span>
-              {item.label}
-            </button>
-          ))}
-        </nav>
+        {/* Opening a link console leaves every view unselected on purpose: the console is
+            not one of them, and highlighting the view behind it would misreport where you
+            are. */}
+        <GooeyNav
+          items={VIEWS}
+          activeId={consoleTarget ? null : view}
+          onSelect={(id) => {
+            setConsoleTarget(null);
+            setView(id);
+          }}
+        />
 
-        <div className="rail__spacer" />
-
-        <div className="rail__section">
-          <div className="eyebrow">Signed in</div>
-          <p className="truncate"><strong>{user.username}</strong></p>
-          {user.key_verified ? (
-            <Badge tone="good">identity verified</Badge>
-          ) : (
-            <Badge tone="warning">keys unpublished</Badge>
-          )}
-        </div>
-
-        <div className="rail__nav">
-          <button className="nav-item" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+        <div className="masthead__actions">
+          <span className="masthead__user truncate" title={user.username}>
+            <strong>{user.username}</strong>
+            {user.key_verified ? (
+              <Badge tone="good">verified</Badge>
+            ) : (
+              <Badge tone="warning">keys unpublished</Badge>
+            )}
+          </span>
+          <button
+            className="icon-btn"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          >
             <span aria-hidden="true">{theme === "dark" ? "☾" : "☀"}</span>
-            {theme === "dark" ? "Dark theme" : "Light theme"}
           </button>
           {lockable && (
-            <button className="nav-item" onClick={lockNow}>
+            <button className="icon-btn" onClick={lockNow} title="Lock keys" aria-label="Lock keys">
               <span aria-hidden="true">⚿</span>
-              Lock keys
             </button>
           )}
-          <button className="nav-item" onClick={signOut}>
+          <button className="icon-btn" onClick={signOut} title="Sign out" aria-label="Sign out">
             <span aria-hidden="true">⤶</span>
-            Sign out
           </button>
         </div>
-      </aside>
+      </header>
 
       <div className="main">
         <header className="topbar">
@@ -260,6 +254,7 @@ export default function App() {
               user={user}
               identity={identity}
               socketEvent={socketEvent}
+              socketStatus={socketStatus}
               onBack={() => setConsoleTarget(null)}
             />
           ) : view === "messaging" ? (

@@ -1,0 +1,250 @@
+/* =============================================================================
+   PRAHARI Console — primary navigation
+   Adapted from React Bits' GooeyNav. See components/GooeyNav.jsx for why this
+   one and not its GSAP-dependent siblings.
+
+   How the effect works: `.gooey__effect--filter` blurs its contents and then
+   drives them through an extreme `contrast()`. Blur bleeds neighbouring shapes
+   into each other; the contrast snaps the resulting soft gradient back to hard
+   edges, so shapes that merely overlap come out fused into one blob. That is
+   the whole trick — there is no canvas and no physics.
+
+   The blend needs a dark backdrop to read, so the bar keeps a dark track in
+   both themes rather than following --surface. A dark nav over a light page is
+   a deliberate choice here, not an oversight.
+   ========================================================================== */
+
+.gooey {
+  position: relative;
+  /* The blob is painted from these; keeping them local means the effect follows
+     the accent token instead of hard-coding a colour. */
+  --gooey-blob: var(--accent);
+  --gooey-track: #0b1116;
+  --gooey-ink: #cddae1;
+}
+
+.gooey nav {
+  display: flex;
+  position: relative;
+  /* Promote to its own layer: the blur below is expensive to recompute on the
+     main thread every frame otherwise. */
+  transform: translate3d(0, 0, 0.01px);
+}
+
+.gooey__list {
+  display: flex;
+  gap: var(--sp-1);
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1);
+  position: relative;
+  z-index: 3;
+  background: var(--gooey-track);
+  border: 1px solid var(--border);
+  border-radius: 100vw;
+}
+
+.gooey__item {
+  position: relative;
+  border-radius: 100vw;
+}
+
+.gooey__item button {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border: 0;
+  border-radius: 100vw;
+  background: transparent;
+  color: var(--gooey-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-med) var(--ease);
+}
+
+.gooey__item button:hover {
+  color: #fff;
+}
+
+/* The pill and the blob are separate paints of the same idea. This one is the
+   honest, non-blurred fallback that guarantees the active item is legible even
+   if the filter layer fails to composite. */
+.gooey__item::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 100vw;
+  background: var(--gooey-blob);
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity var(--dur-med) var(--ease), transform var(--dur-med) var(--ease);
+}
+
+.gooey__item.is-active::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.gooey__item.is-active button {
+  color: var(--accent-ink);
+}
+
+/* Focus has to clear the blob, which is why it is an outline rather than a
+   background change: at this contrast a tinted background would vanish. */
+.gooey__item button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.gooey__effect {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.gooey__effect--text {
+  z-index: 4;
+  color: var(--accent-ink);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  opacity: 0;
+}
+
+.gooey__effect--filter {
+  filter: blur(7px) contrast(100) blur(0);
+  mix-blend-mode: lighten;
+}
+
+/* The dark ground the `lighten` blend resolves against. Without it the blobs
+   composite over the page and the fusing reads as grey mush. */
+.gooey__effect--filter::before {
+  content: "";
+  position: absolute;
+  inset: -75px;
+  z-index: -2;
+  background: #000;
+}
+
+.gooey__effect--filter::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 100vw;
+  background: var(--gooey-blob);
+  transform: scale(0);
+  opacity: 0;
+}
+
+.gooey__effect--filter.is-active::after {
+  animation: gooey-pill 300ms var(--ease) both;
+}
+
+@keyframes gooey-pill {
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.gooey__particle,
+.gooey__point {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  opacity: 0;
+  transform-origin: center;
+}
+
+.gooey__particle {
+  --time: 1.5s;
+  position: absolute;
+  top: calc(50% - 10px);
+  left: calc(50% - 10px);
+  animation: gooey-travel var(--time) ease 1 -350ms;
+}
+
+.gooey__point {
+  background: var(--gooey-blob);
+  opacity: 1;
+  animation: gooey-pop var(--time) ease 1 -350ms;
+}
+
+@keyframes gooey-travel {
+  0% {
+    transform: rotate(0deg) translate(var(--start-x), var(--start-y));
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  70% {
+    transform: rotate(calc(var(--rotate) * 0.5))
+      translate(calc(var(--end-x) * 1.2), calc(var(--end-y) * 1.2));
+    opacity: 1;
+    animation-timing-function: ease;
+  }
+  85% {
+    transform: rotate(calc(var(--rotate) * 0.66)) translate(var(--end-x), var(--end-y));
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(calc(var(--rotate) * 1.2))
+      translate(calc(var(--end-x) * 0.5), calc(var(--end-y) * 0.5));
+    opacity: 1;
+  }
+}
+
+@keyframes gooey-pop {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  25% { transform: scale(calc(var(--scale) * 0.25)); }
+  38% { opacity: 1; }
+  65% {
+    transform: scale(var(--scale));
+    opacity: 1;
+    animation-timing-function: ease;
+  }
+  85% {
+    transform: scale(var(--scale));
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0);
+    opacity: 0;
+  }
+}
+
+/* The label collapses before the bar can overflow: five glyphs still identify
+   the views, and a horizontally scrolling primary nav is worse than a terse one. */
+@media (max-width: 900px) {
+  .gooey__label { display: none; }
+  .gooey__item button { padding: var(--sp-2) var(--sp-3); }
+}
+
+/* The burst is already suppressed in JS; this covers the pill, and the blur
+   layer is dropped entirely so nothing animates and nothing composites. */
+@media (prefers-reduced-motion: reduce) {
+  .gooey__item::after { transition: none; }
+  .gooey__effect { display: none; }
+}
+
+/* The blur/contrast stack is a filter on a blended layer — under forced colors
+   it resolves to an unreadable smear, so the plain pill carries the state. */
+@media (forced-colors: active) {
+  .gooey__effect { display: none; }
+  .gooey__item.is-active { outline: 2px solid CanvasText; }
+}

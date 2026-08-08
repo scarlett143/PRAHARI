@@ -4,44 +4,177 @@
    a named component or a small, explicitly-listed helper.
    ========================================================================== */
 
+/* -- motion ----------------------------------------------------------------
+   Entrance animations for things that appear in response to a click: inline
+   menus, expanding option panels, confirmation forms.
+
+   Keyframes rather than transitions, because every one of these is conditionally
+   rendered in React. An element that does not exist has no previous state to
+   transition from, so a transition would simply pop.
+
+   Movement is small and fast on purpose. These sit inside a dense operator
+   console where a menu is opened to read something, and a long or bouncy
+   entrance delays the reading it exists to serve.
+   ------------------------------------------------------------------------- */
+
+@keyframes reveal-down {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes reveal-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes reveal-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* An inline menu or option panel dropping open under its trigger. */
+.reveal {
+  animation: reveal-down var(--dur-med) var(--ease) both;
+}
+
+/* Something arriving at the bottom of a list: a new message, the reply bar. */
+.reveal--up {
+  animation: reveal-up var(--dur-med) var(--ease) both;
+}
+
+.reveal--fade {
+  animation: reveal-fade var(--dur-med) var(--ease) both;
+}
+
+/* Staggered list entrance. Capped at six because beyond that the last item waits
+   long enough to feel like a fault rather than a flourish. */
+.reveal-list > * { animation: reveal-down var(--dur-med) var(--ease) both; }
+.reveal-list > *:nth-child(1) { animation-delay: 0ms; }
+.reveal-list > *:nth-child(2) { animation-delay: 25ms; }
+.reveal-list > *:nth-child(3) { animation-delay: 50ms; }
+.reveal-list > *:nth-child(4) { animation-delay: 75ms; }
+.reveal-list > *:nth-child(5) { animation-delay: 100ms; }
+.reveal-list > *:nth-child(n + 6) { animation-delay: 125ms; }
+
+/* Nudge on press, so a click on a menu item is acknowledged before the view changes. */
+.nav-item,
+.chip,
+.link-btn,
+.icon-btn {
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.nav-item:active,
+.chip:active,
+.icon-btn:active {
+  transform: scale(0.97);
+}
+
+/* The whole layer is opt-out, not decorative-only: a burst of movement in a
+   console someone is reading is a vestibular trigger, and none of this carries
+   information the static layout does not already carry. */
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal--up,
+  .reveal--fade,
+  .reveal-list > * {
+    animation: none;
+  }
+
+  .nav-item:active,
+  .chip:active,
+  .icon-btn:active {
+    transform: none;
+  }
+}
+
 /* -- layout ---------------------------------------------------------------- */
 
+/* Views moved from a left rail into the masthead, so the shell is now a header
+   over one content column rather than two columns side by side. */
 .app-shell {
   display: grid;
-  grid-template-columns: var(--rail-width) 1fr;
+  grid-template-rows: auto 1fr;
   height: 100%;
   background: var(--page);
 }
 
-.rail {
+.masthead {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: var(--sp-5);
-  padding: var(--sp-5) var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
   background: var(--surface-sunken);
-  border-right: 1px solid var(--border);
-  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
 }
 
-.rail__brand {
+.masthead__brand {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  flex-shrink: 0;
 }
 
+.masthead__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+.masthead__user {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  max-width: 22ch;
+}
+
+/* Square, label-less buttons for theme/lock/sign-out. The accessible name lives
+   on aria-label, since the glyph alone announces as punctuation or nothing. */
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+/* Still used by the channel list inside Messaging, which is a vertical stack of
+   nav items even though the primary navigation no longer is. */
 .rail__nav {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
 }
 
-.rail__section {
-  padding: 0 var(--sp-2);
-  margin-bottom: var(--sp-2);
-}
+/* Below this the masthead runs out of room for brand, five labelled views and
+   the action cluster on one line. The nav drops its labels at 900px (see
+   gooey-nav.css); here the brand wordmark goes too. */
+@media (max-width: 720px) {
+  .masthead {
+    gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
+  }
 
-.rail__spacer {
-  margin-top: auto;
+  .masthead__brand > div,
+  .masthead__user {
+    display: none;
+  }
 }
 
 .nav-item {
@@ -613,6 +746,111 @@
 .message__body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* A retracted message keeps its slot rather than closing the gap, so the transcript does
+   not silently reflow around something that was withdrawn. */
+.message--deleted {
+  border-style: dashed;
+  background: transparent;
+}
+
+/* A message naming you. The left rule carries it rather than the background alone, so it
+   survives greyscale and forced-colors the same way badges do. */
+.message--mentioned {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-wash);
+}
+
+.message--pinned {
+  border-color: var(--accent);
+}
+
+/* Pinned messages, held above the log so they stay reachable without scrolling. Capped
+   rather than unbounded: a pinned bar that grows without limit eventually becomes the
+   channel. */
+.pinned-bar {
+  flex-shrink: 0;
+  max-height: 8rem;
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+}
+
+/* The quoted message a reply points at. The left rule is what carries the relationship,
+   so it stays visible under forced-colors. */
+.message__quote {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--text-xs);
+}
+
+.message__quote > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reply/edit/delete/react. Revealed on hover for pointers, but always present for
+   keyboard and touch -- hiding them behind :hover alone would make every verb in Stage 2
+   unreachable without a mouse. */
+.message__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  font-size: var(--text-xs);
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+
+.message:hover .message__actions,
+.message:focus-within .message__actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .message__actions { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message__actions { transition: none; }
+}
+
+/* Sits directly above the composer so what you are replying to stays visible while you
+   type it. */
+.composer__reply {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: 0 var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--accent);
+  background: var(--surface-raised);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--text-xs);
+}
+
+.composer__reply > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.composer__reply span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* -- receipts, typing, links ----------------------------------------------- */

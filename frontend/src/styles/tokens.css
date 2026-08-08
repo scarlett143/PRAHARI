@@ -32,10 +32,13 @@
   /* -- brand / interactive ------------------------------------------------
      Reserved for interaction and identity. Never used to encode data --
      otherwise a button and a series would claim the same meaning. */
-  --accent: #35d0b8;
-  --accent-hover: #4fe0ca;
-  --accent-ink: #04211d;
-  --accent-wash: rgba(53, 208, 184, 0.12);
+  /* Indigo, not the previous teal. Deliberately far from --good below: when the brand
+     colour and the success colour are both green, a badge reads as "fine" simply for
+     being on brand, and this console's whole job is telling those two apart. */
+  --accent: #7c8cff;
+  --accent-hover: #98a5ff;
+  --accent-ink: #0a0e2b;
+  --accent-wash: rgba(124, 140, 255, 0.14);
   --focus-ring: rgba(53, 208, 184, 0.55);
 
   /* -- status (reserved; never reused as a series) ------------------------ */
@@ -123,10 +126,10 @@
   --ink-muted: #6d7d87;
   --ink-inverse: #f7f8f7;
 
-  --accent: #0a8f7d;
-  --accent-hover: #077a6b;
+  --accent: #4451d6;
+  --accent-hover: #3540b8;
   --accent-ink: #ffffff;
-  --accent-wash: rgba(10, 143, 125, 0.1);
+  --accent-wash: rgba(68, 81, 214, 0.10);
   --focus-ring: rgba(10, 143, 125, 0.5);
 
   /* Light steps of the same six hues, validated against #f7f8f7. */
