@@ -46,6 +46,28 @@ async function getAllInPrefix(prefix) {
   });
 }
 
+/**
+ * Destroy every key, cached plaintext and trust record this browser holds.
+ *
+ * Used by the duress passcode. The whole store goes rather than a list of key prefixes:
+ * a wipe that has to be kept in step with every new record type is a wipe that will
+ * eventually miss one, and the thing it misses is the thing that mattered.
+ *
+ * What this cannot reach is worth stating where the code is. It clears this origin's
+ * IndexedDB. It does not touch the server, other devices, an identity backup file the
+ * owner exported, or anything already copied off the machine. It buys deniability about
+ * *this* browser, not erasure of the account.
+ */
+export async function wipeAllKeys() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 export const loadIdentity = (username) => get(`identity:${username}`);
 
 /**

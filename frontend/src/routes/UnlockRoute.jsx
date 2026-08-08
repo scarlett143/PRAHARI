@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { unlockIdentity } from "../crypto/keylock.js";
+import { wipeAllKeys } from "../storage/keys.js";
 import { Alert, Field, Mark } from "../components/ui.jsx";
 
 /**
@@ -20,7 +21,21 @@ export default function UnlockRoute({ user, record, onUnlocked, onSignOut }) {
     setBusy(true);
     setError("");
     try {
-      onUnlocked(await unlockIdentity(record, passcode));
+      const opened = await unlockIdentity(record, passcode);
+      if (opened.duress) {
+        // The duress passcode was entered. Destroy this browser's keys and leave by the
+        // ordinary sign-out door.
+        //
+        // Nothing about this path announces itself. It shows no warning, logs nothing,
+        // and tells the server nothing -- a confirmation dialog or a distinct message
+        // would defeat the entire purpose, because the person who compelled the passcode
+        // is watching the screen. What they see is a sign-out, and a device that turns
+        // out to hold no keys.
+        await wipeAllKeys();
+        onSignOut();
+        return;
+      }
+      onUnlocked(opened.identity);
     } catch (caught) {
       setError(caught.message);
       setPasscode("");
