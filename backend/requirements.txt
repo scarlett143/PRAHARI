@@ -13,6 +13,4 @@ PyJWT==2.10.1
 cryptography==45.0.5
 kyber-py==1.0.1
 
-pytest==8.4.1
-pytest-asyncio==1.1.0
-httpx==0.28.1
+# Test tooling lives in requirements-dev.txt. Production installs neither pytest nor httpx.

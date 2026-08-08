@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Annotated
 
+import anyio
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import get_settings
 from ..database import get_db
 from ..models import QuantumExperiment
 from ..quantum.executor import run_security_lab
@@ -15,11 +19,25 @@ from ..security import CurrentUser
 from .common import audit
 
 router = APIRouter(prefix="/api/v2/quantum", tags=["quantum-demo"])
+settings = get_settings()
+
+
+#: One lab run at a time, process-wide.
+#:
+#: This is the most expensive thing the service will ever be asked to do, and it exists to
+#: demonstrate a protocol rather than to serve anyone. Letting several run concurrently
+#: would let a handful of clicks saturate both cores of a box that also carries the
+#: operator's panel, billing and status sites. Queueing is the correct answer: a demo can
+#: wait, production traffic cannot.
+_LAB_LIMITER = anyio.CapacityLimiter(1)
 
 
 class ExperimentRequest(BaseModel):
-    shots: int = Field(default=1024, ge=128, le=8192)
-    bb84_rounds: int = Field(default=2048, ge=256, le=20000)
+    # Ceilings cut from 8192 shots / 20000 rounds. Nothing is demonstrated at the top of
+    # that range that is not demonstrated at the top of this one, and the difference is
+    # seconds of a shared CPU.
+    shots: int = Field(default=1024, ge=128, le=2048)
+    bb84_rounds: int = Field(default=2048, ge=256, le=4096)
     intercept_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -30,11 +48,20 @@ async def run_experiment(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    if not settings.quantum_lab_enabled:
+        raise HTTPException(404, "the quantum lab is not enabled on this deployment")
     try:
-        result = run_security_lab(
-            shots=body.shots,
-            bb84_rounds=body.bb84_rounds,
-            intercept_rate=body.intercept_rate,
+        # In a worker thread, never on the event loop. `run_security_lab` is seconds of
+        # synchronous simulation; running it inline stops every other request in the
+        # process -- message relay, WebSocket fan-out, health checks -- until it returns.
+        result = await anyio.to_thread.run_sync(
+            partial(
+                run_security_lab,
+                shots=body.shots,
+                bb84_rounds=body.bb84_rounds,
+                intercept_rate=body.intercept_rate,
+            ),
+            limiter=_LAB_LIMITER,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None

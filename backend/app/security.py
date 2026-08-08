@@ -5,6 +5,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
+import anyio
+import anyio.to_thread
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
@@ -42,6 +44,19 @@ _bearer = HTTPBearer(auto_error=False)
 CHALLENGE_TTL_SECONDS = 300
 
 
+#: Caps how many passwords may be hashed at once.
+#:
+#: Argon2 is deliberately expensive, which makes it the one operation here that can take
+#: the whole service down by succeeding. Two limits meet at this number. Memory: each call
+#: holds 19 MiB for its duration, and `prahari.service` is capped at MemoryMax=768M, so the
+#: default 40-thread pool would reserve ~760 MiB of hashing alone and OOM the unit. CPU:
+#: the box has two cores, so more than a handful of concurrent hashes only adds contention.
+#:
+#: Four is two per core -- enough that a burst of logins overlaps rather than queues, low
+#: enough that ~76 MiB is the worst case.
+_PASSWORD_LIMITER = anyio.CapacityLimiter(4)
+
+
 def hash_password(password: str) -> str:
     if len(password) < 12:
         raise ValueError("password must be at least 12 characters")
@@ -61,6 +76,40 @@ def verify_password(stored_hash: str, password: str) -> tuple[bool, Optional[str
 def consume_unknown_user_password_cost(password: str) -> None:
     """Burn one Argon2 verification for missing usernames to reduce timing leakage."""
     verify_password(_dummy_password_hash, password)
+
+
+# -- async wrappers ----------------------------------------------------------
+#
+# Argon2 is CPU-bound C code, and calling it directly from an `async def` endpoint runs it
+# on the event loop thread. That does not merely make logins slow -- it stops the entire
+# process for the duration: no messages relayed, no WebSocket frames delivered, no health
+# check answered, for every request in flight. With one uvicorn worker on two cores that is
+# the difference between a slow login and a stalled service.
+#
+# Moving it to a worker thread is genuinely parallel rather than cosmetic: argon2-cffi
+# releases the GIL while hashing, so the event loop keeps running.
+
+
+async def hash_password_async(password: str) -> str:
+    return await anyio.to_thread.run_sync(hash_password, password, limiter=_PASSWORD_LIMITER)
+
+
+async def verify_password_async(stored_hash: str, password: str) -> tuple[bool, Optional[str]]:
+    return await anyio.to_thread.run_sync(
+        verify_password, stored_hash, password, limiter=_PASSWORD_LIMITER
+    )
+
+
+async def consume_unknown_user_password_cost_async(password: str) -> None:
+    """The timing equaliser has to cost the same as a real verify, including the wait.
+
+    Sharing the limiter is what makes that true: if the dummy hash could skip the queue a
+    busy server would answer unknown usernames measurably faster than real ones, which is
+    exactly the leak this function exists to close.
+    """
+    await anyio.to_thread.run_sync(
+        consume_unknown_user_password_cost, password, limiter=_PASSWORD_LIMITER
+    )
 
 
 def issue_access_token(*, user_id: str, username: str, role: str) -> tuple[str, int, str, datetime]:

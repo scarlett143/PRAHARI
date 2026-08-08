@@ -1,0 +1,11 @@
+# Test and development tooling.
+#
+# Split out of requirements.txt so a production install does not carry a test runner and
+# an HTTP client it never imports. This is disk and install time on a box shared with the
+# operator's other services, not runtime CPU -- but it is also the difference between
+# knowing what production is running and guessing.
+-r requirements.txt
+
+pytest==8.4.1
+pytest-asyncio==1.1.0
+httpx==0.28.1

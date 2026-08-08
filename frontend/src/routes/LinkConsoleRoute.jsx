@@ -9,6 +9,21 @@ import { clockTime, coordinate, integer, num, relativeTime } from "../lib/format
 
 const MAX_POINTS = 240;
 
+/** Full backlog on open or after a rotation, when there is genuinely nothing cached. */
+const BACKFILL_LIMIT = 200;
+/**
+ * A fallback poll only has to cover what arrived since the last one. Asking for the full
+ * backlog every few seconds made the server join and serialise 200 rows to hand back a
+ * handful the client had usually already seen.
+ */
+const CATCHUP_LIMIT = 50;
+/**
+ * Only used while the socket is down. The push link is the real transport; at 3s this
+ * ran 20 requests a minute per open console *forever*, including against a healthy
+ * socket and a tab nobody was looking at.
+ */
+const FALLBACK_POLL_MS = 15000;
+
 /**
  * Ground control console for one aircraft.
  *
@@ -16,7 +31,14 @@ const MAX_POINTS = 240;
  * opaque envelopes and never held the session key, so the telemetry on screen
  * is not something the backend could have rendered on our behalf.
  */
-export default function LinkConsoleRoute({ target, user, identity, socketEvent, onBack }) {
+export default function LinkConsoleRoute({
+  target,
+  user,
+  identity,
+  socketEvent,
+  socketStatus,
+  onBack,
+}) {
   const [channel, setChannel] = useState(null);
   const [frames, setFrames] = useState([]);
   const [session, setSession] = useState({ tone: "neutral", text: "Establishing session…" });
@@ -25,8 +47,8 @@ export default function LinkConsoleRoute({ target, user, identity, socketEvent, 
   const seenRef = useRef(new Set());
 
   const ingest = useCallback(
-    async (details) => {
-      const rows = await workspaceApi.messages(details.id, 200);
+    async (details, limit = BACKFILL_LIMIT) => {
+      const rows = await workspaceApi.messages(details.id, limit);
       const decoded = [];
       for (const message of rows) {
         if (message.sender_id === user.id) continue; // our own uplink
@@ -77,16 +99,54 @@ export default function LinkConsoleRoute({ target, user, identity, socketEvent, 
     open();
   }, [open]);
 
-  // Live push; the poll is a safety net for a dropped socket.
+  // Live push. Separated from the poll below on purpose: while both lived in one effect,
+  // every socket frame tore down and rebuilt the interval, so the fallback timer was
+  // driven by traffic it was supposed to be independent of.
   useEffect(() => {
-    if (!channel) return undefined;
-    if (socketEvent?.channel_id === channel.id) {
-      if (socketEvent.type === "channel.epoch_rotated") open();
-      else ingest(channel).catch(() => {});
-    }
-    const timer = setInterval(() => ingest(channel).catch(() => {}), 3000);
-    return () => clearInterval(timer);
+    if (!channel || socketEvent?.channel_id !== channel.id) return;
+    if (socketEvent.type === "channel.epoch_rotated") open();
+    else ingest(channel, CATCHUP_LIMIT).catch(() => {});
   }, [channel, socketEvent, ingest, open]);
+
+  // The safety net, and only that.
+  //
+  // It runs when the socket is not open, and stops while the tab is hidden -- a
+  // backgrounded console has nobody reading it, and telemetry it missed is fetched on the
+  // way back anyway. A healthy socket in a visible tab now issues no polls at all, where
+  // this previously cost 20 requests a minute per console regardless of either.
+  useEffect(() => {
+    if (!channel || socketStatus === "open") return undefined;
+
+    let timer = null;
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const start = () => {
+      if (timer === null) {
+        timer = setInterval(() => ingest(channel, CATCHUP_LIMIT).catch(() => {}), FALLBACK_POLL_MS);
+      }
+    };
+
+    const sync = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        // Catch up once on return rather than waiting out a full interval.
+        ingest(channel, CATCHUP_LIMIT).catch(() => {});
+        start();
+      }
+    };
+
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [channel, socketStatus, ingest]);
 
   const telemetry = useMemo(() => {
     const positions = frames
