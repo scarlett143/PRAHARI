@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -183,3 +184,223 @@ async def add_member(
         if skipped
         else None,
     }
+
+
+class RenameServerRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=96)
+
+
+async def _owned_server(db: AsyncSession, server_id: str, user: User) -> Server:
+    server = (await db.execute(select(Server).where(Server.id == server_id))).scalars().first()
+    if server is None:
+        raise HTTPException(404, "server not found")
+    if server.owner_id != user.id and user.role != "admin":
+        raise HTTPException(403, "only the workspace owner can do that")
+    return server
+
+
+async def _member_ids(db: AsyncSession, server_id: str) -> list[str]:
+    rows = (
+        await db.execute(
+            select(server_members.c.user_id).where(server_members.c.server_id == server_id)
+        )
+    ).all()
+    return [row[0] for row in rows]
+
+
+@router.patch("/{server_id}")
+async def rename_server(
+    server_id: str,
+    body: RenameServerRequest,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Rename a workspace.
+
+    A name is a label, not a key: nothing is derived from it and no envelope binds it, so
+    changing one cannot invalidate a session or orphan a message.
+    """
+    server = await _owned_server(db, server_id, user)
+    members = await _member_ids(db, server.id)
+    previous, server.name = server.name, body.name.strip()
+
+    await audit(
+        db,
+        event="server.renamed",
+        actor_id=user.id,
+        request=request,
+        detail=f"{server.id}:{previous!r}->{server.name!r}",
+    )
+    await db.commit()
+    await manager.notify_users(
+        members, {"type": "server.renamed", "server_id": server.id, "name": server.name}
+    )
+    return await _serialize_server(db, server, user.id)
+
+
+@router.delete("/{server_id}")
+async def delete_server(
+    server_id: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Destroy a workspace, its channels and their messages.
+
+    Irreversible, and it reaches other people's history as well as the owner's, which is
+    why the console asks for the name to be typed before calling this.
+
+    What it cannot do is worth stating: every member who has already read a message holds
+    the plaintext locally, and deleting the workspace does not reach their device. This
+    removes the relay's copy.
+    """
+    server = await _owned_server(db, server_id, user)
+    members = await _member_ids(db, server.id)
+    name = server.name
+
+    await audit(
+        db,
+        event="server.deleted",
+        actor_id=user.id,
+        severity="high",
+        request=request,
+        detail=f"{server.id}:{name!r}",
+    )
+    # Channels and messages go with it: the relationship cascades, and a channel outliving
+    # its workspace would be unreachable rather than merely orphaned.
+    await db.delete(server)
+    await db.commit()
+    await manager.notify_users(
+        members, {"type": "server.deleted", "server_id": server_id, "name": name}
+    )
+    return {"deleted": server_id, "name": name}
+
+
+async def _detach_member(
+    db: AsyncSession, *, server: Server, target_id: str
+) -> tuple[list[str], list[str]]:
+    """Remove one member from a workspace and every channel in it.
+
+    Returns the channels they left and those whose epoch was advanced. Rotation is the
+    point: membership rows stop the relay handing them new envelopes, but the departing
+    member still holds the current epoch's key and could read anything sent under it.
+    Advancing the epoch is what actually ends their access.
+    """
+    channels = (
+        await db.execute(select(Channel).where(Channel.server_id == server.id))
+    ).scalars().all()
+
+    left: list[str] = []
+    rotated: list[str] = []
+    for channel in channels:
+        present = (
+            await db.execute(
+                select(channel_members.c.user_id).where(
+                    channel_members.c.channel_id == channel.id,
+                    channel_members.c.user_id == target_id,
+                )
+            )
+        ).first()
+        if present is None:
+            continue
+        await db.execute(
+            channel_members.delete().where(
+                channel_members.c.channel_id == channel.id,
+                channel_members.c.user_id == target_id,
+            )
+        )
+        left.append(channel.id)
+        channel.key_epoch += 1
+        channel.epoch_started_at = datetime.now(timezone.utc)
+        rotated.append(channel.id)
+
+    await db.execute(
+        server_members.delete().where(
+            server_members.c.server_id == server.id, server_members.c.user_id == target_id
+        )
+    )
+    return left, rotated
+
+
+@router.delete("/{server_id}/members/{user_id}")
+async def remove_member(
+    server_id: str,
+    user_id: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Remove someone from a workspace, and rotate what they could still read."""
+    server = await _owned_server(db, server_id, user)
+    if user_id == server.owner_id:
+        # Removing the owner would leave a workspace nobody can administer.
+        raise HTTPException(409, "the owner cannot be removed; transfer or delete instead")
+
+    members_before = await _member_ids(db, server.id)
+    if user_id not in members_before:
+        raise HTTPException(404, "that user is not a member")
+
+    left, rotated = await _detach_member(db, server=server, target_id=user_id)
+    await audit(
+        db,
+        event="server.member_removed",
+        actor_id=user.id,
+        severity="medium",
+        request=request,
+        detail=f"{server.id}:removed={user_id};rotated={len(rotated)}",
+    )
+    await db.commit()
+    await manager.notify_users(
+        members_before,
+        {
+            "type": "server.member_removed",
+            "server_id": server.id,
+            "user_id": user_id,
+            "rotated_channels": rotated,
+        },
+    )
+    return {"server_id": server.id, "removed": user_id, "left_channels": left, "rotated": rotated}
+
+
+@router.post("/{server_id}/leave")
+async def leave_server(
+    server_id: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Leave a workspace you are a member of.
+
+    Distinct from deleting it: the workspace survives for everyone else. The owner is
+    refused, because leaving would strand a workspace with no one able to administer it.
+    """
+    server = (await db.execute(select(Server).where(Server.id == server_id))).scalars().first()
+    if server is None:
+        raise HTTPException(404, "server not found")
+    if server.owner_id == user.id:
+        raise HTTPException(409, "the owner cannot leave; delete the workspace instead")
+
+    members_before = await _member_ids(db, server.id)
+    if user.id not in members_before:
+        raise HTTPException(404, "you are not a member of that workspace")
+
+    left, rotated = await _detach_member(db, server=server, target_id=user.id)
+    await audit(
+        db,
+        event="server.member_left",
+        actor_id=user.id,
+        request=request,
+        detail=f"{server.id}:rotated={len(rotated)}",
+    )
+    await db.commit()
+    await manager.notify_users(
+        members_before,
+        {
+            "type": "server.member_removed",
+            "server_id": server.id,
+            "user_id": user.id,
+            "rotated_channels": rotated,
+        },
+    )
+    return {"server_id": server.id, "left_channels": left, "rotated": rotated}

@@ -1308,3 +1308,11 @@
   .rail__section, .rail__spacer { display: none; }
   .view { padding: var(--sp-4) var(--sp-3); }
 }
+
+/* The nav bar is two gooey groups with the workspace switcher between them. */
+.masthead__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}

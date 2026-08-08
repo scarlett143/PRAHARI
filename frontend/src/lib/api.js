@@ -6,7 +6,9 @@
  *
  * Set VITE_API_URL only when the API genuinely lives on another origin.
  */
-const API_URL = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
+// Optional chaining because `import.meta.env` is injected by Vite and absent under plain
+// Node, where this module is unit-tested.
+const API_URL = (import.meta.env?.VITE_API_URL ?? "").trim().replace(/\/$/, "");
 const TOKEN_KEY = "prahari_token";
 
 /** Absolute base for building WebSocket URLs, which cannot be relative. */
@@ -55,11 +57,16 @@ export async function api(path, options = {}) {
 
   const raw = await response.text();
   let body = null;
+  //: True when the response was not JSON. Anything reaching this app through its own
+  //: origin should be JSON, so a non-JSON body means the request never got as far as the
+  //: application: nginx, Cloudflare, or a proxy in between answered instead.
+  let unparseable = false;
   if (raw) {
     try {
       body = JSON.parse(raw);
     } catch {
       body = raw;
+      unparseable = true;
     }
   }
 
@@ -71,9 +78,43 @@ export async function api(path, options = {}) {
       setToken("");
       window.dispatchEvent(new CustomEvent("prahari:session-ended"));
     }
-    throw new ApiError(response.status, body?.detail ?? body ?? `HTTP ${response.status}`);
+    // Never surface the body of a non-JSON response. A gateway error page is an entire
+    // HTML document, and passing it through as `message` dumped the page's markup into
+    // the UI -- which is what "sending failed" looked like to anyone who hit a restart or
+    // a Cloudflare timeout mid-send.
+    if (unparseable) {
+      throw new ApiError(response.status, gatewayMessage(response.status));
+    }
+    throw new ApiError(response.status, body?.detail ?? `HTTP ${response.status}`);
+  }
+  //: A successful response that is not JSON is equally wrong, and returning the markup
+  //: would push the same problem into whichever caller tried to read a field off it.
+  if (unparseable) {
+    throw new ApiError(response.status, gatewayMessage(response.status));
   }
   return body;
+}
+
+/**
+ * What to say when something between the browser and the app answered instead of the app.
+ *
+ * Phrased around what the operator should do rather than which component failed: they
+ * cannot tell nginx from Cloudflare from uvicorn, and at this layer neither can we.
+ */
+function gatewayMessage(status) {
+  if (status === 502 || status === 503 || status === 504) {
+    return "The server is not responding right now. Your message was not sent — try again in a moment.";
+  }
+  if (status === 413) {
+    return "That message is too large to send.";
+  }
+  if (status === 429) {
+    return "Too many requests. Wait a moment and try again.";
+  }
+  if (status >= 500) {
+    return `The server failed to handle that request (HTTP ${status}). Your message was not sent.`;
+  }
+  return `The request did not reach the application (HTTP ${status}).`;
 }
 
 const post = (path, payload) =>
@@ -128,6 +169,14 @@ export const workspaceApi = {
   create: (name) => post("/api/v2/servers", { name }),
   addMember: (serverId, username) =>
     post(`/api/v2/servers/${serverId}/members`, { username }),
+  rename: (serverId, name) => api(`/api/v2/servers/${serverId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  }),
+  remove: (serverId) => api(`/api/v2/servers/${serverId}`, { method: "DELETE" }),
+  removeMember: (serverId, userId) =>
+    api(`/api/v2/servers/${serverId}/members/${userId}`, { method: "DELETE" }),
+  leave: (serverId) => post(`/api/v2/servers/${serverId}/leave`),
   createChannel: (body) => post("/api/v2/channels", body),
   // Group channel: the creator plus everyone named. Three or more members switches the
   // channel from a pairwise ratchet to a shared epoch key.

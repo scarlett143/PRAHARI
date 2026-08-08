@@ -248,3 +248,131 @@
   .gooey__effect { display: none; }
   .gooey__item.is-active { outline: 2px solid CanvasText; }
 }
+
+/* -- workspace switcher -----------------------------------------------------
+   Sits inside the masthead beside the nav, styled to match its track without
+   joining it: this control selects context, it does not navigate.
+   ------------------------------------------------------------------------- */
+
+.wsmenu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.wsmenu__trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 15rem;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 100vw;
+  background: var(--gooey-track, #0b1116);
+  color: var(--gooey-ink, #cddae1);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.wsmenu__trigger:hover,
+.wsmenu__trigger.is-open {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.wsmenu__trigger:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.wsmenu__name {
+  max-width: 9rem;
+}
+
+/* Rotates to point up while the panel is open, so the control shows its own state. */
+.wsmenu__caret {
+  transition: transform var(--dur-med) var(--ease);
+}
+
+.wsmenu__trigger.is-open .wsmenu__caret {
+  transform: rotate(180deg);
+}
+
+.wsmenu__panel {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  left: 0;
+  z-index: 40;
+  width: 19rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.wsmenu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wsmenu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.wsmenu__item:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.wsmenu__item.is-active {
+  background: var(--accent-wash);
+  color: var(--ink);
+}
+
+.wsmenu__divider {
+  height: 1px;
+  background: var(--border);
+}
+
+.wsmenu__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  font-size: var(--text-xs);
+}
+
+.wsmenu__error {
+  margin: 0;
+  color: var(--critical);
+  font-size: var(--text-xs);
+}
+
+/* The label goes before the nav labels do: the workspace icon still identifies it,
+   and the panel spells the name out in full the moment it opens. */
+@media (max-width: 1100px) {
+  .wsmenu__name { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wsmenu__caret { transition: none; }
+}

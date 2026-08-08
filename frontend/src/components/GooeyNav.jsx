@@ -49,12 +49,17 @@ export default function GooeyNav({ items, activeId, onSelect, label = "Primary" 
   //: against a tree that no longer exists.
   const timers = useRef(new Set());
 
-  const activeIndex = Math.max(0, items.findIndex((item) => item.id === activeId));
+  //: -1 when the active view is not in *this* group, which happens whenever the bar is
+  //: split around another control or a link console is open. Clamping to 0 instead --
+  //: as this did -- lights up the first item and reports the operator is somewhere they
+  //: are not.
+  const activeIndex = items.findIndex((item) => item.id === activeId);
+  const hasActive = activeIndex >= 0;
 
   /** Park the two overlays exactly over the active item. */
   const positionOverlays = useCallback(() => {
     const container = containerRef.current;
-    const target = listRef.current?.children[activeIndex];
+    const target = activeIndex >= 0 ? listRef.current?.children[activeIndex] : null;
     if (!container || !target || !filterRef.current || !textRef.current) return;
 
     const containerBox = container.getBoundingClientRect();
@@ -147,7 +152,10 @@ export default function GooeyNav({ items, activeId, onSelect, label = "Primary" 
 
   useEffect(() => {
     positionOverlays();
-    textRef.current?.classList.add("is-active");
+    // No active item in this group means nothing to light up, so the overlays stay hidden
+    // rather than parking over whatever happens to be first.
+    textRef.current?.classList.toggle("is-active", hasActive);
+    if (filterRef.current) filterRef.current.style.opacity = hasActive ? "" : "0";
 
     // The active pill is positioned in pixels, so it has to be recomputed whenever the
     // bar is laid out again -- a window resize, a label changing width, or a webfont
@@ -156,7 +164,7 @@ export default function GooeyNav({ items, activeId, onSelect, label = "Primary" 
     if (containerRef.current) observer.observe(containerRef.current);
     if (listRef.current) observer.observe(listRef.current);
     return () => observer.disconnect();
-  }, [positionOverlays]);
+  }, [positionOverlays, hasActive]);
 
   useEffect(() => {
     const pending = timers.current;

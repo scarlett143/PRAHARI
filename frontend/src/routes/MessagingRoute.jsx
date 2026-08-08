@@ -50,9 +50,16 @@ const QUICK_REACTIONS = ["👍", "✅", "❓", "🙏"];
 
 /** Human-to-human secure messaging over the same hybrid handshake the aircraft link
  *  uses: a Double Ratchet between two people, a shared epoch key among more. */
-export default function MessagingRoute({ user, identity, socketEvent, socketSend }) {
-  const [workspaces, setWorkspaces] = useState([]);
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState("");
+export default function MessagingRoute({
+  user,
+  identity,
+  socketEvent,
+  socketSend,
+  // Owned by App now that the switcher lives in the masthead, which outlives this view.
+  workspaces,
+  activeWorkspaceId,
+  onWorkspacesChanged,
+}) {
   const [channel, setChannel] = useState(null);
   const [messages, setMessages] = useState([]);
   const [replyTo, setReplyTo] = useState(null);
@@ -99,12 +106,11 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
 
   /* -- loading ------------------------------------------------------------- */
 
-  const refreshWorkspaces = useCallback(async () => {
-    const data = await workspaceApi.list();
-    setWorkspaces(data);
-    setActiveWorkspaceId((current) => current || data[0]?.id || "");
-    return data;
-  }, []);
+  // Delegated upward: App holds the list, so a change here has to reach the masthead.
+  const refreshWorkspaces = useCallback(
+    async () => (await onWorkspacesChanged?.()) ?? workspaces,
+    [onWorkspacesChanged, workspaces],
+  );
 
   const refreshLinks = useCallback(async () => {
     try {
@@ -454,6 +460,17 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
     }, TYPING_IDLE_MS);
   }
 
+  /** One sealed envelope, uploaded. Separated so `emit` can run it twice after a rotation. */
+  async function sealAndSend(target, payloadText) {
+    const envelope = await encryptForChannel(target, user, identity, payloadText);
+    return workspaceApi.send({
+      client_message_id: crypto.randomUUID(),
+      channel_id: target.id,
+      key_epoch: target.key_epoch,
+      envelope_b64: envelope,
+    });
+  }
+
   /**
    * Seal one payload and put it on the channel.
    *
@@ -461,16 +478,26 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
    * are indistinguishable on the wire precisely because they take the same path.
    */
   async function emit(payloadText) {
-    const envelope = await encryptForChannel(channel, user, identity, payloadText);
-    const created = await workspaceApi.send({
-      client_message_id: crypto.randomUUID(),
-      channel_id: channel.id,
-      key_epoch: channel.key_epoch,
-      envelope_b64: envelope,
-    });
+    let target = channel;
+    let created;
+    try {
+      created = await sealAndSend(target, payloadText);
+    } catch (caught) {
+      if (caught.code !== "rekey_required") throw caught;
+      // An epoch reaching its message or time limit is routine, not a failure: it is the
+      // forward-secrecy boundary doing its job. Surfacing it made sending look broken and
+      // put the operator in the position of pressing a button to make their own message
+      // go. Rotate and resend once; a second refusal is a real problem and propagates.
+      const rotated = await workspaceApi.rotateEpoch(target.id);
+      target = { ...target, key_epoch: rotated.key_epoch };
+      setChannel(target);
+      await openChannelSession(target, user, identity);
+      setSessionStatus({ tone: "good", text: `Encrypted · epoch ${rotated.key_epoch}` });
+      created = await sealAndSend(target, payloadText);
+    }
     // Our own plaintext is stored, not re-derived: the sending key is gone the instant
     // it is used, so this is the only copy this device will ever have.
-    await savePlaintext(channel.id, created.id, {
+    await savePlaintext(target.id, created.id, {
       messageId: created.id,
       plaintext: payloadText,
       authenticated: true,
@@ -501,9 +528,11 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
     try {
       await run();
     } catch (caught) {
+      // `emit` already rotates and retries once, so reaching here with this code means
+      // the fresh epoch was refused too -- a real fault rather than the routine limit.
       setError(
         caught.code === "rekey_required"
-          ? "This epoch reached its rotation limit. Rotate the epoch and try again."
+          ? "The channel refused a freshly rotated epoch. Reopen the channel and try again."
           : caught.message,
       );
     } finally {
@@ -570,10 +599,13 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
       editPrefs((draftPrefs) => setDraftPref(draftPrefs, channel.id, ""));
     } catch (caught) {
       if (caught.code === "rekey_required") {
-        setError("This epoch reached its rotation limit. Rotate the epoch and send again.");
+        // Reached only when the retry on a freshly rotated epoch was also refused.
+        setError("The channel refused a freshly rotated epoch. Reopen the channel and try again.");
       } else {
         setError(caught.message);
       }
+      // The draft is deliberately left in the box on failure: clearing it would destroy
+      // what someone just wrote to report that it did not send.
     } finally {
       setBusy(false);
     }
@@ -618,19 +650,11 @@ export default function MessagingRoute({ user, identity, socketEvent, socketSend
   return (
     <div className="chat">
       <aside className="chat__sidebar">
-        <Panel title="Workspace">
+        {/* The workspace is chosen in the masthead now. This panel shows what is inside
+            the chosen one, so the heading names it rather than offering a second, easily
+            desynchronised place to switch. */}
+        <Panel title={activeWorkspace?.name || "Workspace"}>
           <div className="stack">
-            <select
-              className="select"
-              value={activeWorkspace?.id || ""}
-              onChange={(changeEvent) => setActiveWorkspaceId(changeEvent.target.value)}
-              aria-label="Select workspace"
-            >
-              {workspaces.map((item) => (
-                <option key={item.id} value={item.id}>{item.name}</option>
-              ))}
-            </select>
-
             <ChannelList
               channels={activeWorkspace?.channels ?? []}
               activeId={channel?.id}

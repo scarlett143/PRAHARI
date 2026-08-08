@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
-import { authApi, getToken, setToken } from "./lib/api.js";
+import { authApi, getToken, setToken, workspaceApi } from "./lib/api.js";
 import { useRealtime } from "./lib/useRealtime.js";
 import { loadIdentity } from "./storage/keys.js";
 import { isLocked } from "./crypto/keylock.js";
@@ -7,6 +7,7 @@ import { publishKeyBundle } from "./crypto/publish.js";
 import UnlockRoute from "./routes/UnlockRoute.jsx";
 import { Badge, Mark, Spinner } from "./components/ui.jsx";
 import GooeyNav from "./components/GooeyNav.jsx";
+import WorkspaceMenu from "./components/WorkspaceMenu.jsx";
 import AuthRoute from "./routes/AuthRoute.jsx";
 import JoinRoute from "./routes/JoinRoute.jsx";
 import MessagingRoute from "./routes/MessagingRoute.jsx";
@@ -28,6 +29,13 @@ const VIEWS = [
   { id: "security", label: "Security", glyph: "✓", title: "Security posture" },
 ];
 
+// The bar is rendered as two groups with the workspace switcher between them, so the
+// switcher lands after Messaging and before Fleet. Two GooeyNav instances rather than one
+// because the gooey pill is positioned within its own container; a control sitting inside
+// that container would be something the blob slides across.
+const VIEWS_BEFORE_WORKSPACE = VIEWS.slice(0, 1);
+const VIEWS_AFTER_WORKSPACE = VIEWS.slice(1);
+
 const THEME_KEY = "prahari_theme";
 
 /** `/join/<code>` is the only path the app serves besides the console itself. */
@@ -44,6 +52,8 @@ export default function App() {
   const [lockable, setLockable] = useState(false);
   const [view, setView] = useState("messaging");
   const [consoleTarget, setConsoleTarget] = useState(null);
+  const [workspaces, setWorkspaces] = useState([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState("");
   const [checking, setChecking] = useState(true);
   const [inviteCode, setInviteCode] = useState(readInviteCode);
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "dark");
@@ -107,6 +117,60 @@ export default function App() {
     status: socketStatus,
     send: socketSend,
   } = useRealtime(Boolean(user));
+
+  /* -- workspaces ---------------------------------------------------------
+     Held here rather than in MessagingRoute because the switcher now lives in the
+     masthead, which outlives any one view. MessagingRoute receives the list and the
+     selection as props instead of fetching them itself.
+     ---------------------------------------------------------------------- */
+
+  const refreshWorkspaces = useCallback(async () => {
+    if (!user) return [];
+    try {
+      const data = await workspaceApi.list();
+      setWorkspaces(data);
+      setActiveWorkspaceId((current) =>
+        // Keep the current selection if it still exists; a workspace deleted or left from
+        // another device must not leave the console pointing at nothing.
+        data.some((item) => item.id === current) ? current : data[0]?.id || "",
+      );
+      return data;
+    } catch {
+      return [];
+    }
+  }, [user]);
+
+  useEffect(() => {
+    refreshWorkspaces();
+  }, [refreshWorkspaces]);
+
+  const createWorkspace = async (name) => {
+    const created = await workspaceApi.create(name);
+    await refreshWorkspaces();
+    setActiveWorkspaceId(created.id);
+    setView("messaging");
+  };
+
+  const renameWorkspace = async (id, name) => {
+    await workspaceApi.rename(id, name);
+    await refreshWorkspaces();
+  };
+
+  const dropWorkspace = async (id, action) => {
+    await action(id);
+    const remaining = await refreshWorkspaces();
+    // Selecting the first survivor rather than leaving the id dangling: the view behind
+    // the menu is still Messaging, and it needs somewhere to point.
+    setActiveWorkspaceId(remaining.find((item) => item.id !== id)?.id || "");
+  };
+
+  const deleteWorkspace = (id) => dropWorkspace(id, workspaceApi.remove);
+  const leaveWorkspace = (id) => dropWorkspace(id, workspaceApi.leave);
+
+  function selectView(id) {
+    setConsoleTarget(null);
+    setView(id);
+  }
 
   function signOut() {
     setToken("");
@@ -189,14 +253,38 @@ export default function App() {
         {/* Opening a link console leaves every view unselected on purpose: the console is
             not one of them, and highlighting the view behind it would misreport where you
             are. */}
-        <GooeyNav
-          items={VIEWS}
-          activeId={consoleTarget ? null : view}
-          onSelect={(id) => {
-            setConsoleTarget(null);
-            setView(id);
-          }}
-        />
+        <div className="masthead__nav">
+          <GooeyNav
+            items={VIEWS_BEFORE_WORKSPACE}
+            activeId={consoleTarget ? null : view}
+            onSelect={selectView}
+            label="Primary"
+          />
+
+          <WorkspaceMenu
+            workspaces={workspaces}
+            activeId={activeWorkspaceId}
+            currentUserId={user.id}
+            onSelect={(id) => {
+              setActiveWorkspaceId(id);
+              // Choosing a workspace is only meaningful in Messaging, so switching from
+              // anywhere else takes you where the choice applies.
+              setConsoleTarget(null);
+              setView("messaging");
+            }}
+            onCreate={createWorkspace}
+            onRename={renameWorkspace}
+            onDelete={deleteWorkspace}
+            onLeave={leaveWorkspace}
+          />
+
+          <GooeyNav
+            items={VIEWS_AFTER_WORKSPACE}
+            activeId={consoleTarget ? null : view}
+            onSelect={selectView}
+            label="Secondary"
+          />
+        </div>
 
         <div className="masthead__actions">
           <span className="masthead__user truncate" title={user.username}>
@@ -263,6 +351,9 @@ export default function App() {
               identity={identity}
               socketEvent={socketEvent}
               socketSend={socketSend}
+              workspaces={workspaces}
+              activeWorkspaceId={activeWorkspaceId}
+              onWorkspacesChanged={refreshWorkspaces}
             />
           ) : view === "fleet" ? (
             <FleetRoute onOpenConsole={setConsoleTarget} />
