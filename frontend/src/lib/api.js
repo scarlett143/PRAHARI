@@ -92,6 +92,9 @@ export const authApi = {
   recoveryReset: (body) => post("/api/v2/auth/recovery/reset", body),
   publishKeys: (body) => post("/api/v2/keys/publish", body),
   keyBundle: (username) => api(`/api/v2/keys/${encodeURIComponent(username)}`),
+  // The peer's full publish history. Verified in the browser, never trusted as returned:
+  // a log the relay grades itself against is not evidence.
+  keyHistory: (username) => api(`/api/v2/keys/${encodeURIComponent(username)}/history`),
 };
 
 /* -- sessions ---------------------------------------------------------------
@@ -101,6 +104,15 @@ export const twoFactorApi = {
   setup: () => post("/api/v2/auth/2fa/setup"),
   enable: (code) => post("/api/v2/auth/2fa/enable", { code }),
   disable: (password, code) => post("/api/v2/auth/2fa/disable", { password, code }),
+};
+
+export const passkeyApi = {
+  list: () => api("/api/v2/auth/passkeys"),
+  registerChallenge: () => post("/api/v2/auth/passkeys/register/challenge"),
+  register: (body) => post("/api/v2/auth/passkeys/register", body),
+  remove: (id) => api(`/api/v2/auth/passkeys/${id}`, { method: "DELETE" }),
+  loginChallenge: (username) => post("/api/v2/auth/passkeys/login/challenge", { username }),
+  login: (body) => post("/api/v2/auth/passkeys/login", body),
 };
 
 export const sessionApi = {
@@ -132,6 +144,10 @@ export const workspaceApi = {
   messages: (channelId, limit = 100) =>
     api(`/api/v2/channels/${channelId}/messages?limit=${limit}`),
   send: (body) => post("/api/v2/messages", body),
+  // Asks the relay to drop the stored ciphertext. The sealed `del` event published on the
+  // channel is what peers actually honour; this only stops the server serving the message
+  // to a device that has not synced yet.
+  deleteMessage: (messageId) => api(`/api/v2/messages/${messageId}`, { method: "DELETE" }),
   searchUsers: (query) => api(`/api/v2/users?query=${encodeURIComponent(query)}`),
   presence: () => api("/api/v2/users/presence"),
   acknowledge: (channelId, messageIds, state) =>
@@ -178,6 +194,31 @@ export const fleetApi = {
   provision: (body) => post("/api/v2/fleet/uavs", body),
   provisionBulk: (body) => post("/api/v2/fleet/uavs/bulk", body),
   link: (callsign) => post(`/api/v2/fleet/uavs/${encodeURIComponent(callsign)}/link`),
+  // Containment. Quarantine is reversible; revoke is not, and destroys the enrolment path.
+  quarantine: (callsign, reason) =>
+    post(`/api/v2/fleet/uavs/${encodeURIComponent(callsign)}/quarantine`, { reason }),
+  revoke: (callsign, reason) =>
+    post(`/api/v2/fleet/uavs/${encodeURIComponent(callsign)}/revoke`, { reason }),
+  restore: (callsign) => post(`/api/v2/fleet/uavs/${encodeURIComponent(callsign)}/restore`),
+  // Pin the firmware digest this endpoint should report. An empty value clears the pin.
+  pinMeasurement: (callsign, measurementB64) =>
+    post(`/api/v2/fleet/uavs/${encodeURIComponent(callsign)}/attestation`, {
+      measurement_b64: measurementB64,
+    }),
+};
+
+/* -- vpn control plane ------------------------------------------------------ */
+
+// Control plane only: this issues configuration and carries sealed keys. No tunnel is
+// terminated by the API server. See backend/app/api/vpn.py.
+export const vpnApi = {
+  gateways: () => api("/api/v2/vpn/gateways"),
+  createGateway: (body) => post("/api/v2/vpn/gateways", body),
+  peers: (gatewayId, includeRevoked = false) =>
+    api(`/api/v2/vpn/gateways/${gatewayId}/peers?include_revoked=${includeRevoked}`),
+  enrolPeer: (gatewayId, body) => post(`/api/v2/vpn/gateways/${gatewayId}/peers`, body),
+  revokePeer: (peerId, reason) => post(`/api/v2/vpn/peers/${peerId}/revoke`, { reason }),
+  config: (peerId) => api(`/api/v2/vpn/peers/${peerId}/config`),
 };
 
 /* -- proofs, quantum, admin ------------------------------------------------- */

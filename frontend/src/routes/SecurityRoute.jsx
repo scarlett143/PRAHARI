@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import { opsApi, sessionApi, twoFactorApi } from "../lib/api.js";
+import { useCallback, useEffect, useState } from "react";
+import { opsApi, passkeyApi, sessionApi, twoFactorApi } from "../lib/api.js";
 import { Alert, Badge, Field, Panel } from "../components/ui.jsx";
 import { backupFilename, exportIdentity } from "../crypto/backup.js";
 import { MIN_PASSCODE_LENGTH, isLocked, lockIdentity } from "../crypto/keylock.js";
 import { loadIdentity, replaceIdentityRecord } from "../storage/keys.js";
+import { createPasskey, passkeysSupported } from "../crypto/passkey.js";
+import { relativeTime } from "../lib/format.js";
 
 /**
  * Two-step verification.
@@ -194,6 +196,135 @@ function whenSeen(value) {
 }
 
 /**
+ * Register and remove passkeys.
+ *
+ * Presented as an additional way in rather than a replacement, because that is what it is:
+ * the identity key still outranks it, and recovering the account with that key deletes
+ * every passkey here. Saying so next to the button matters — someone who believes a
+ * passkey is their last line of defence will treat losing the device very differently from
+ * someone who knows recovery still works.
+ */
+function PasskeyPanel() {
+  const [keys, setKeys] = useState([]);
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState("");
+
+  const supported = passkeysSupported();
+
+  const load = useCallback(async () => {
+    try {
+      setKeys(await passkeyApi.list());
+    } catch (caught) {
+      setError(caught.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function register() {
+    setBusy(true);
+    setError("");
+    setDone("");
+    try {
+      const options = await passkeyApi.registerChallenge();
+      const created = await createPasskey(options);
+      await passkeyApi.register({ ...created, label: label.trim() });
+      setLabel("");
+      setDone("Passkey registered.");
+      await load();
+    } catch (caught) {
+      // A cancelled prompt throws here too, and reporting that as a failure would be
+      // misleading — nothing went wrong, the person changed their mind.
+      setError(caught.name === "NotAllowedError" ? "" : caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id) {
+    setBusy(true);
+    setError("");
+    try {
+      await passkeyApi.remove(id);
+      setDone("Passkey removed.");
+      await load();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel
+      eyebrow="Access"
+      title="Passkeys"
+      description="Sign in with a device key instead of a password. The site's origin is inside the signed assertion, so a passkey cannot be used on a look-alike page."
+    >
+      <div className="stack" style={{ maxWidth: "34rem" }}>
+        {!supported && (
+          <Alert tone="warning" title="This browser cannot use passkeys">
+            Everything else on this page still works.
+          </Alert>
+        )}
+
+        {keys.length === 0 ? (
+          <Alert tone="info" title="No passkeys registered">
+            You sign in with your password{" "}
+            {/* Deliberately does not claim the account is less safe without one. */}
+            and, if enabled, a verification code.
+          </Alert>
+        ) : (
+          <ul className="stack" style={{ gap: "var(--sp-2)" }}>
+            {keys.map((key) => (
+              <li key={key.id} className="row row--between" style={{ gap: "var(--sp-3)" }}>
+                <div>
+                  <strong>{key.label || "Unnamed passkey"}</strong>
+                  <p className="subtle">
+                    Added {relativeTime(key.created_at)} ·{" "}
+                    {key.last_used_at ? `last used ${relativeTime(key.last_used_at)}` : "never used"}
+                  </p>
+                </div>
+                <button className="link-btn" disabled={busy} onClick={() => remove(key.id)}>
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <Alert tone="info" title="A passkey cannot lock you out">
+          Your identity key still outranks it. Resetting the password with that key deletes
+          every passkey listed here — deliberately, so a key someone else enrolled cannot
+          survive a recovery, and so losing your device never strands you.
+        </Alert>
+
+        {error && <Alert tone="error">{error}</Alert>}
+        {done && <Alert tone="good">{done}</Alert>}
+
+        <Field label="Name this device (optional)" id="passkey-label">
+          <input
+            id="passkey-label"
+            className="input"
+            value={label}
+            placeholder="Work laptop"
+            onChange={(changeEvent) => setLabel(changeEvent.target.value)}
+          />
+        </Field>
+
+        <button className="btn btn--primary" disabled={busy || !supported} onClick={register}>
+          {busy ? "Waiting for your device…" : "Register a passkey"}
+        </button>
+      </div>
+    </Panel>
+  );
+}
+
+/**
  * Everywhere this account is signed in, and the means to end any of it.
  *
  * The point of this screen is the case where a device is lost: a token stays valid until
@@ -300,6 +431,7 @@ function LockPanel({ user, identity }) {
   const [locked, setLocked] = useState(null);
   const [passcode, setPasscode] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [duress, setDuress] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
@@ -312,17 +444,20 @@ function LockPanel({ user, identity }) {
   if (!identity) return null;
 
   const mismatch = confirmation.length > 0 && passcode !== confirmation;
+  const duressTooShort = duress.length > 0 && duress.length < MIN_PASSCODE_LENGTH;
+  const duressClashes = duress.length > 0 && duress === passcode;
 
   async function applyLock() {
     setBusy(true);
     setError("");
     setDone("");
     try {
-      const record = await lockIdentity(identity, user.username, passcode);
+      const record = await lockIdentity(identity, user.username, passcode, duress);
       await replaceIdentityRecord(user.username, record);
       setLocked(true);
       setPasscode("");
       setConfirmation("");
+      setDuress("");
       setDone(locked ? "Passcode changed." : "Keys are now encrypted on this device.");
     } catch (caught) {
       setError(caught.message);
@@ -396,14 +531,59 @@ function LockPanel({ user, identity }) {
           />
         </Field>
 
+        <Field
+          label="Duress passcode (optional)"
+          id="lock-duress"
+          hint="Leave blank if you do not want one. Setting it later means re-entering both."
+        >
+          <input
+            id="lock-duress"
+            type="password"
+            className="input"
+            value={duress}
+            autoComplete="new-password"
+            onChange={(changeEvent) => setDuress(changeEvent.target.value)}
+          />
+        </Field>
+
+        <Alert tone="warning" title="What the duress passcode does">
+          Entering it at the lock screen erases every key, cached message and trust record
+          in this browser, then signs out. There is no confirmation and no warning — that
+          is the point, since anyone forcing you to unlock is watching the screen.
+          <br />
+          <br />
+          It reaches this browser only. It cannot recall messages from the server, reach
+          your other devices, or destroy a backup file you exported. And it cannot help if
+          your keys are not locked in the first place: with no lock screen there is nothing
+          to type it into.
+        </Alert>
+
         {mismatch && <Alert tone="warning">The two passcodes do not match.</Alert>}
+        {duressTooShort && (
+          <Alert tone="warning">
+            The duress passcode needs at least {MIN_PASSCODE_LENGTH} characters.
+          </Alert>
+        )}
+        {duressClashes && (
+          <Alert tone="warning">
+            The duress passcode must differ from the unlock passcode, or unlocking would
+            wipe the device.
+          </Alert>
+        )}
         {error && <Alert tone="error">{error}</Alert>}
         {done && <Alert tone="good">{done}</Alert>}
 
         <div className="row" style={{ gap: "var(--sp-3)" }}>
           <button
             className="btn btn--primary"
-            disabled={busy || passcode.length < MIN_PASSCODE_LENGTH || mismatch || !confirmation}
+            disabled={
+              busy ||
+              passcode.length < MIN_PASSCODE_LENGTH ||
+              mismatch ||
+              !confirmation ||
+              duressTooShort ||
+              duressClashes
+            }
             onClick={applyLock}
           >
             {busy ? "Sealing…" : locked ? "Change passcode" : "Lock keys"}
@@ -544,6 +724,15 @@ export default function SecurityRoute({ user, identity }) {
     ["Identity proof", "Ed25519 signed challenge and signed key bundle", true],
     ["Server plaintext access", "Prevented by architecture", true],
     ["Aircraft link", "Identical protocol to human-to-human channels", true],
+    ["Endpoint containment", "A compromised aircraft can be quarantined or revoked: sessions revoked, live sockets closed, enrolment path destroyed", true],
+    ["Duress passcode", "An optional second passcode that erases this browser's keys instead of unlocking them. Its presence is not observable in stored data", true],
+    ["Firmware drift detection", "An operator pins the approved digest; an endpoint reporting a different one is flagged and audited", true],
+    ["Key transparency", "Every published key bundle is appended to a per-user hash chain, recomputed in your browser — the record of a key cannot be rewritten after the fact", true],
+    ["Passkeys", "Hardware-backed sign-in. The origin is inside the signed assertion, so a passkey cannot be phished onto a look-alike site", true],
+    ["Hybrid certificate chain", "Every certificate is signed twice, Ed25519 and ML-DSA-65, over identical bytes — and both must verify, so forging one means breaking two unrelated problems", true],
+    ["Signed firmware releases", "An image is approved by an Ed25519 signature over its digest, bound to fleet and version — endpoints verify before installing, from any mirror", true],
+    ["Post-quantum VPN keying", "WireGuard pre-shared keys are generated in your browser and sealed to the gateway with X25519 + ML-KEM-768 — the control plane stores ciphertext it cannot open", true],
+    ["Tamper-evident audit log", "Sealed entries are hash-chained and committed to by checkpoints — editing, reordering or truncating past events is detectable", true],
     ["Server-reported invariant", health ? `server_can_read_messages: ${health.server_can_read_messages}` : "unavailable", health ? health.server_can_read_messages === false : false],
   ];
 
@@ -552,6 +741,15 @@ export default function SecurityRoute({ user, identity }) {
     ["At-rest encryption is opt-in", "Private keys sit in IndexedDB in the clear unless you set a device passcode below. Even with one, the lock protects a stolen machine — not a session that is already open, where the keys are in memory by definition."],
     ["Browser trust", "IndexedDB keeps private keys off the server, but not away from malicious JavaScript running in this origin. XSS defeats it."],
     ["Metadata is visible", "The server necessarily sees accounts, membership, channel ids, timestamps, ciphertext sizes, and delivery events. End-to-end encryption protects content, not all metadata."],
+    ["This server cannot issue a certificate", "It stores, verifies and serves them; certificates arrive already signed by whoever holds the issuing keys. That is deliberate — a relay able to issue could impersonate everyone the chain vouches for. It follows that trust in a root is an administrator's decision here, never something a submitted certificate can claim for itself, and that key custody and expiry are handled wherever the issuing keys actually live."],
+    ["Firmware images are not stored here", "This service publishes a signed digest, not the image. That is what lets an endpoint fetch bytes from any mirror and still refuse anything the operator did not approve — but it also means withdrawing a release only stops endpoints that check before installing. It does nothing to one already running the image; getting a fleet off a bad build still means shipping a newer release."],
+    ["The VPN is a control plane, not a tunnel", "PRAHARI decides who may join, allocates addresses, carries sealed pre-shared keys and revokes access. It does not carry packets — WireGuard runs elsewhere, because a data plane is sustained CPU on a host shared with other services. It follows that revoking a peer takes effect when the gateway next applies its configuration; a session already established stays up until the gateway reloads. And this does not make WireGuard post-quantum: it distributes the pre-shared key that gives WireGuard post-quantum resistance, over a channel that already has it."],
+    ["The audit log is only sealed when asked", "Hashing every entry as it is written would make two simultaneous requests contend over the chain's tail, so a request could fail because of its own audit write. The chain is stamped by a separate sealing pass instead — which means anything written since the last seal can still be deleted without trace. Checkpoints are worth exporting off this machine: held only here, they can be rewritten by anyone who can rewrite the log."],
+    ["Passkeys are a way in, not a way to lock others out", "A passkey never outranks the identity key. Recovering the account with that key deletes every registered passkey along with TOTP — deliberately, so a credential an attacker enrolled cannot survive the recovery, and so losing your authenticator never strands you. Attestation statements are not checked either: the server does not verify which authenticator model created a credential, so it cannot enforce a hardware allow-list."],
+    ["Transparency catches a changed answer, not a first one", "The key chain makes it impossible to rewrite, reorder or drop a past key bundle without every following hash failing. It does not help on first contact — with no earlier state to compare against there is nothing to detect — and it cannot stop a relay simply declining to serve a history. Comparing safety numbers once, in person or on a call you trust, is still what establishes who you are talking to."],
+    ["Attestation is self-reported, not proved", "A firmware measurement arrives over an authenticated channel, so it proves the endpoint holds its enrolment key — not that it is running the software it names. An attacker in control of the airframe can report the digest you pinned while running anything. This catches downgrades, mis-flashed images and unapproved builds; catching a hostile endpoint would need a hardware root of trust signing the measurement with a key the main processor cannot read, which this fleet does not assume."],
+    ["The duress passcode is local and needs the lock", "It erases this browser and nothing else — not the server's copies, not your other devices, and not a backup file you exported. It only works if the keys are locked in the first place, because with no lock screen there is nowhere to type it. And an attacker who images the disk before you type it keeps that image."],
+    ["Revocation does not reach the endpoint", "Quarantining or revoking an aircraft stops it authenticating to this relay and closes the sockets it holds. It does not travel to the airframe, does not erase the keys already on it, and does not make ciphertext an attacker has captured unreadable. Rotate the channel epoch to close what a revoked endpoint could still decrypt."],
     ["ML-KEM side channels", "Neither the browser nor the pure-Python ML-KEM implementation is claimed constant-time. Use liboqs for anything deployed."],
     ["Quantum module is a demo", "QRNG output is an entropy-diversity input only, and BB84 here is a simulation. Cloud-delivered quantum bits are visible to the provider."],
   ];
@@ -581,6 +779,8 @@ export default function SecurityRoute({ user, identity }) {
       <LockPanel user={user} identity={identity} />
 
       <TwoFactorPanel user={user} />
+
+      <PasskeyPanel />
 
       <SessionsPanel />
 
