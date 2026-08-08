@@ -6,9 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import datetime, timedelta, timezone
+
 from .. import audit_chain
+from . import servers as servers_api
 from ..database import get_db
-from ..models import AuditCheckpoint, AuditLog, User
+from ..models import AuditCheckpoint, AuditLog, Server, User
 from ..security import AdminUser
 from .common import audit
 
@@ -88,6 +91,46 @@ async def set_user_status(
     )
     await db.commit()
     return {"user_id": target.id, "status": target.status}
+
+
+@router.post("/purge-deleted-workspaces")
+async def purge_deleted_workspaces(
+    admin: AdminUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Hard-delete workspaces whose restore window has passed.
+
+    Explicit rather than a background timer, for the same reason audit sealing and anchor
+    batching are: this box runs one worker on two shared cores, and a loop waking up to
+    find nothing to do is a cost paid forever for work that happens monthly. Run it from
+    cron at whatever cadence suits; nothing breaks if it is late, and rows simply stay
+    restorable slightly longer than advertised.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=servers_api.DELETION_GRACE_DAYS)
+    expired = (
+        await db.execute(
+            select(Server).where(Server.deleted_at.isnot(None), Server.deleted_at < cutoff)
+        )
+    ).scalars().all()
+
+    purged = []
+    for server in expired:
+        purged.append({"id": server.id, "name": server.name})
+        # Now the cascade is wanted: channels and their messages go with it.
+        await db.delete(server)
+
+    if purged:
+        await audit(
+            db,
+            event="server.purged",
+            actor_id=admin.id,
+            severity="high",
+            request=request,
+            detail=f"count={len(purged)}",
+        )
+    await db.commit()
+    return {"purged": len(purged), "workspaces": purged}
 
 
 @router.post("/audit/seal")

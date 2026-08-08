@@ -145,3 +145,112 @@ def test_a_stranger_cannot_leave_a_workspace_they_were_never_in():
         assert client.post(
             f"/api/v2/servers/{server['id']}/leave", headers=stranger_headers
         ).status_code == 404
+
+
+def test_deleting_is_reversible_inside_the_grace_window():
+    """The point of the window: a deletion reaches other people's history, and noticing
+    that a minute later must not be too late."""
+    with TestClient(app) as client:
+        owner_headers, _, _ = register_verified(client, _unique("owner"))
+        member_headers, member, _ = register_verified(client, _unique("member"))
+        server = _workspace(client, owner_headers)
+        _add(client, owner_headers, server["id"], member["username"])
+        channel_id = server["channels"][0]["id"]
+
+        assert client.delete(f"/api/v2/servers/{server['id']}", headers=owner_headers).status_code == 200
+
+        # Gone for everyone immediately -- the window preserves undo, not access.
+        assert server["id"] not in [r["id"] for r in client.get("/api/v2/servers", headers=owner_headers).json()]
+        assert server["id"] not in [r["id"] for r in client.get("/api/v2/servers", headers=member_headers).json()]
+        assert client.get(f"/api/v2/channels/{channel_id}", headers=owner_headers).status_code == 404
+
+        listed = client.get("/api/v2/servers/deleted", headers=owner_headers).json()
+        entry = next(row for row in listed if row["id"] == server["id"])
+        assert entry["expired"] is False
+        assert entry["restorable_for_days"] >= 28
+
+        restored = client.post(f"/api/v2/servers/{server['id']}/restore", headers=owner_headers)
+        assert restored.status_code == 200, restored.text
+
+        # Back for the owner *and* the member, since the deletion took it from both.
+        assert server["id"] in [r["id"] for r in client.get("/api/v2/servers", headers=owner_headers).json()]
+        assert server["id"] in [r["id"] for r in client.get("/api/v2/servers", headers=member_headers).json()]
+        assert client.get(f"/api/v2/channels/{channel_id}", headers=owner_headers).status_code == 200
+
+
+def test_only_the_owner_sees_or_restores_a_deleted_workspace():
+    with TestClient(app) as client:
+        owner_headers, _, _ = register_verified(client, _unique("owner"))
+        member_headers, member, _ = register_verified(client, _unique("member"))
+        server = _workspace(client, owner_headers)
+        _add(client, owner_headers, server["id"], member["username"])
+        client.delete(f"/api/v2/servers/{server['id']}", headers=owner_headers)
+
+        assert client.get("/api/v2/servers/deleted", headers=member_headers).json() == []
+        assert client.post(
+            f"/api/v2/servers/{server['id']}/restore", headers=member_headers
+        ).status_code == 403
+
+
+def test_a_deleted_workspace_cannot_be_renamed_or_deleted_again():
+    with TestClient(app) as client:
+        owner_headers, _, _ = register_verified(client, _unique("owner"))
+        server = _workspace(client, owner_headers)
+        client.delete(f"/api/v2/servers/{server['id']}", headers=owner_headers)
+
+        assert client.patch(
+            f"/api/v2/servers/{server['id']}", headers=owner_headers, json={"name": "zombie"}
+        ).status_code == 404
+        assert client.delete(
+            f"/api/v2/servers/{server['id']}", headers=owner_headers
+        ).status_code == 404
+
+
+def test_purging_removes_only_workspaces_past_the_window():
+    import anyio
+    from datetime import datetime, timedelta, timezone
+    from app.api import servers as servers_api
+    from app.database import get_session_factory
+    from app.models import Server
+
+    with TestClient(app) as client:
+        owner_headers, owner, _ = register_verified(client, _unique("owner"))
+        recent = _workspace(client, owner_headers, name=_unique("recent"))
+        stale = _workspace(client, owner_headers, name=_unique("stale"))
+        client.delete(f"/api/v2/servers/{recent['id']}", headers=owner_headers)
+        client.delete(f"/api/v2/servers/{stale['id']}", headers=owner_headers)
+
+        async def age_out():
+            async with get_session_factory()() as session:
+                row = await session.get(Server, stale["id"])
+                row.deleted_at = datetime.now(timezone.utc) - timedelta(
+                    days=servers_api.DELETION_GRACE_DAYS + 1
+                )
+                await session.commit()
+
+        async def promote():
+            """The purge endpoint is admin-only, so the fixture owner needs the role."""
+            from app.models import User
+
+            async with get_session_factory()() as session:
+                row = await session.get(User, owner["id"])
+                row.role = "admin"
+                await session.commit()
+
+        anyio.run(age_out)
+        anyio.run(promote)
+
+        purged = client.post("/api/v2/admin/purge-deleted-workspaces", headers=owner_headers)
+        assert purged.status_code == 200, purged.text
+        purged_ids = [row["id"] for row in purged.json()["workspaces"]]
+
+        assert stale["id"] in purged_ids
+        assert recent["id"] not in purged_ids, "a workspace still inside its window must survive"
+
+        # The recent one is still restorable; the stale one is simply gone.
+        assert client.post(
+            f"/api/v2/servers/{recent['id']}/restore", headers=owner_headers
+        ).status_code == 200
+        assert client.post(
+            f"/api/v2/servers/{stale['id']}/restore", headers=owner_headers
+        ).status_code == 404

@@ -376,3 +376,14 @@
 @media (prefers-reduced-motion: reduce) {
   .wsmenu__caret { transition: none; }
 }
+
+/* Restorable workspaces, listed under the actions. Deliberately understated: it is a
+   safety net, not a place anyone should be spending time. */
+.wsmenu__deleted {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+}

@@ -7,7 +7,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import AuditLog, Channel, User, channel_members
+from ..models import AuditLog, Channel, Server, User, channel_members
 
 
 def b64d(value: str, *, expect: Optional[int] = None, field: str = "value") -> bytes:
@@ -48,7 +48,16 @@ async def require_channel_member(db: AsyncSession, channel_id: str, user: User) 
     row = await db.execute(
         select(Channel)
         .join(channel_members, channel_members.c.channel_id == Channel.id)
-        .where(Channel.id == channel_id, channel_members.c.user_id == user.id)
+        # A deleted workspace's channels are refused from the moment it is deleted, not
+        # when the grace period expires. The window exists so the owner can undo, not so
+        # the workspace keeps working while they decide -- and this is the single choke
+        # point every message, receipt and rotation path already passes through.
+        .join(Server, Server.id == Channel.server_id)
+        .where(
+            Channel.id == channel_id,
+            channel_members.c.user_id == user.id,
+            Server.deleted_at.is_(None),
+        )
     )
     channel = row.scalars().first()
     if channel is None:

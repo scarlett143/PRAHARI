@@ -74,6 +74,7 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("uav_profiles", "security_state_reason", "VARCHAR"),
     ("anchor_batches", "pq_signature", "BINARY"),
     ("anchor_batches", "pq_algorithm", "VARCHAR"),
+    ("servers", "deleted_at", "TIMESTAMP"),
     ("audit_logs", "seq", "INTEGER"),
     ("audit_logs", "prev_hash", "BINARY"),
     ("audit_logs", "entry_hash", "BINARY"),

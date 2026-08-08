@@ -177,6 +177,9 @@ export const workspaceApi = {
   removeMember: (serverId, userId) =>
     api(`/api/v2/servers/${serverId}/members/${userId}`, { method: "DELETE" }),
   leave: (serverId) => post(`/api/v2/servers/${serverId}/leave`),
+  // Deleted workspaces still inside their restore window, owner-only.
+  deleted: () => api("/api/v2/servers/deleted"),
+  restore: (serverId) => post(`/api/v2/servers/${serverId}/restore`),
   createChannel: (body) => post("/api/v2/channels", body),
   // Group channel: the creator plus everyone named. Three or more members switches the
   // channel from a pairwise ratchet to a shared epoch key.

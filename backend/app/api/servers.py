@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -59,7 +59,9 @@ async def list_servers(user: CurrentUser, db: Annotated[AsyncSession, Depends(ge
     rows = await db.execute(
         select(Server)
         .join(server_members, server_members.c.server_id == Server.id)
-        .where(server_members.c.user_id == user.id)
+        # A deleted workspace disappears from every member's list at once; only its owner
+        # sees it again, under /deleted, and only until the window closes.
+        .where(server_members.c.user_id == user.id, Server.deleted_at.is_(None))
         .order_by(Server.created_at.asc())
     )
     servers = rows.scalars().all()
@@ -192,7 +194,10 @@ class RenameServerRequest(BaseModel):
 
 async def _owned_server(db: AsyncSession, server_id: str, user: User) -> Server:
     server = (await db.execute(select(Server).where(Server.id == server_id))).scalars().first()
-    if server is None:
+    # Answered as absent rather than forbidden: to everyone except the restore path a
+    # deleted workspace is gone, and saying "deleted" here would be a second way to learn
+    # that an id was once real.
+    if server is None or server.deleted_at is not None:
         raise HTTPException(404, "server not found")
     if server.owner_id != user.id and user.role != "admin":
         raise HTTPException(403, "only the workspace owner can do that")
@@ -267,9 +272,10 @@ async def delete_server(
         request=request,
         detail=f"{server.id}:{name!r}",
     )
-    # Channels and messages go with it: the relationship cascades, and a channel outliving
-    # its workspace would be unreachable rather than merely orphaned.
-    await db.delete(server)
+    # Marked rather than dropped. `require_channel_member` refuses a deleted workspace's
+    # channels immediately, so access ends now; what the window preserves is the ability
+    # to undo, which a cascade would have destroyed before anyone noticed the mistake.
+    server.deleted_at = datetime.now(timezone.utc)
     await db.commit()
     await manager.notify_users(
         members, {"type": "server.deleted", "server_id": server_id, "name": name}
@@ -351,15 +357,7 @@ async def remove_member(
         detail=f"{server.id}:removed={user_id};rotated={len(rotated)}",
     )
     await db.commit()
-    await manager.notify_users(
-        members_before,
-        {
-            "type": "server.member_removed",
-            "server_id": server.id,
-            "user_id": user_id,
-            "rotated_channels": rotated,
-        },
-    )
+    await _announce_removal(members_before, server.id, user_id, rotated)
     return {"server_id": server.id, "removed": user_id, "left_channels": left, "rotated": rotated}
 
 
@@ -394,13 +392,108 @@ async def leave_server(
         detail=f"{server.id}:rotated={len(rotated)}",
     )
     await db.commit()
+    await _announce_removal(members_before, server.id, user.id, rotated)
+    return {"server_id": server.id, "left_channels": left, "rotated": rotated}
+
+
+#: How long a deleted workspace can be brought back. Long enough that a mistake is noticed
+#: after a weekend and a holiday, short enough that "deleted" eventually means deleted.
+DELETION_GRACE_DAYS = 30
+
+
+async def _announce_removal(
+    member_ids: list[str], server_id: str, removed_id: str, rotated: list[str]
+) -> None:
+    """Tell the workspace someone left, and tell each channel its epoch moved.
+
+    The second half is what makes rotation actually take effect for the people staying.
+    Advancing the epoch invalidates the session they hold, and without a per-channel
+    notice their client would keep the old one until something else made them reopen --
+    so the first thing they would learn is a message they could not decrypt.
+    """
     await manager.notify_users(
-        members_before,
+        member_ids,
         {
             "type": "server.member_removed",
-            "server_id": server.id,
-            "user_id": user.id,
+            "server_id": server_id,
+            "user_id": removed_id,
             "rotated_channels": rotated,
         },
     )
-    return {"server_id": server.id, "left_channels": left, "rotated": rotated}
+    for channel_id in rotated:
+        await manager.notify_users(
+            member_ids, {"type": "channel.epoch_rotated", "channel_id": channel_id}
+        )
+
+
+@router.get("/deleted")
+async def list_deleted(user: CurrentUser, db: Annotated[AsyncSession, Depends(get_db)]):
+    """Workspaces this user deleted that can still be restored."""
+    rows = (
+        await db.execute(
+            select(Server)
+            .where(Server.owner_id == user.id, Server.deleted_at.isnot(None))
+            .order_by(Server.deleted_at.desc())
+        )
+    ).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for row in rows:
+        deleted_at = row.deleted_at
+        if deleted_at.tzinfo is None:
+            deleted_at = deleted_at.replace(tzinfo=timezone.utc)
+        remaining = timedelta(days=DELETION_GRACE_DAYS) - (now - deleted_at)
+        out.append(
+            {
+                "id": row.id,
+                "name": row.name,
+                "deleted_at": row.deleted_at,
+                "restorable_for_days": max(0, remaining.days),
+                "expired": remaining.total_seconds() <= 0,
+            }
+        )
+    return out
+
+
+@router.post("/{server_id}/restore")
+async def restore_server(
+    server_id: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Undo a deletion inside the grace window.
+
+    Restores access for every member, not just the owner: the deletion took it from all
+    of them, so undoing it has to give it back to all of them.
+    """
+    server = (await db.execute(select(Server).where(Server.id == server_id))).scalars().first()
+    if server is None:
+        raise HTTPException(404, "server not found")
+    if server.owner_id != user.id and user.role != "admin":
+        raise HTTPException(403, "only the workspace owner can restore it")
+    if server.deleted_at is None:
+        return await _serialize_server(db, server, user.id)
+
+    deleted_at = server.deleted_at
+    if deleted_at.tzinfo is None:
+        deleted_at = deleted_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - deleted_at > timedelta(days=DELETION_GRACE_DAYS):
+        raise HTTPException(410, "the restore window for this workspace has passed")
+
+    server.deleted_at = None
+    await audit(
+        db,
+        event="server.restored",
+        actor_id=user.id,
+        severity="medium",
+        request=request,
+        detail=f"{server.id}:{server.name!r}",
+    )
+    await db.commit()
+    members = await _member_ids(db, server.id)
+    await manager.notify_users(
+        members, {"type": "server.restored", "server_id": server.id, "name": server.name}
+    )
+    return await _serialize_server(db, server, user.id)

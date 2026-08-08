@@ -121,6 +121,11 @@ class Server(Base):
     name = Column(String(96), nullable=False)
     owner_id = Column(String, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    #: Set when the workspace is deleted. The rows stay for a grace period so an accidental
+    #: deletion -- which reaches other people's history, not just the owner's -- is
+    #: recoverable rather than final the instant the button is pressed. Access is refused
+    #: from the moment this is set; only the ability to undo survives.
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
 
     members = relationship("User", secondary=server_members, back_populates="servers")
     channels = relationship("Channel", back_populates="server", cascade="all, delete-orphan")

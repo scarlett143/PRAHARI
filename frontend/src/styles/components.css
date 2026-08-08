@@ -1316,3 +1316,25 @@
   gap: var(--sp-2);
   min-width: 0;
 }
+
+/* The key epoch, shown beside the session badge. Quiet by default; a brief accent flash
+   marks the moment it advances, since rotation is otherwise silent now. */
+.epoch-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  transition: color var(--dur-med) var(--ease);
+}
+
+.epoch-mark.is-fresh {
+  color: var(--accent);
+  font-weight: var(--weight-medium);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .epoch-mark { transition: none; }
+}

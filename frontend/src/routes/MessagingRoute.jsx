@@ -750,6 +750,7 @@ export default function MessagingRoute({
               </Badge>
             ))}
             <Badge tone={sessionStatus.tone}>{sessionStatus.text}</Badge>
+            {channel && <EpochMark epoch={channel.key_epoch} />}
             <button
               className="btn btn--sm"
               onClick={() => setShowSaved((value) => !value)}
@@ -1696,5 +1697,41 @@ function AddPeer({ workspace, onAdded }) {
         </button>
       </div>
     </Panel>
+  );
+}
+
+/**
+ * The channel's current key epoch.
+ *
+ * Added because rotation became invisible. Sending now rotates and retries on its own,
+ * which is the right behaviour but removed the only signal that forward secrecy was doing
+ * anything -- and a security property nobody can observe is one nobody will notice
+ * failing. This is the observation: a number that quietly changes, and flashes once when
+ * it does so the change is attributable to the moment it happened.
+ */
+function EpochMark({ epoch }) {
+  const [flash, setFlash] = useState(false);
+  const previous = useRef(epoch);
+
+  useEffect(() => {
+    if (previous.current === epoch) return undefined;
+    previous.current = epoch;
+    setFlash(true);
+    const timer = setTimeout(() => setFlash(false), 1600);
+    return () => clearTimeout(timer);
+  }, [epoch]);
+
+  return (
+    <span
+      className={flash ? "epoch-mark is-fresh" : "epoch-mark"}
+      title="Key epoch. It advances on rotation, and everything sent before it stays unreadable to a key captured after."
+    >
+      <span aria-hidden="true">⟳</span> epoch {epoch}
+      {/* Announced only on change: a live region that re-reads on every render would
+          interrupt a screen-reader user mid-message. */}
+      <span className="sr-only" role="status">
+        {flash ? `Key rotated to epoch ${epoch}` : ""}
+      </span>
+    </span>
   );
 }

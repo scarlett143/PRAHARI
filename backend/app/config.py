@@ -31,7 +31,11 @@ class Settings(BaseSettings):
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173")
 
     rekey_after_messages: int = Field(default=100, ge=1)
-    rekey_after_minutes: int = Field(default=15, ge=1)
+    #: Raised from 15. A time-based rotation on a quiet channel spends a handshake on
+    #: nobody's behalf: the message-count limit already bounds how much traffic one epoch
+    #: covers, and this only bounds how long. An hour keeps the window short while cutting
+    #: rotations roughly fourfold on a channel used in bursts.
+    rekey_after_minutes: int = Field(default=60, ge=1)
     max_message_bytes: int = Field(default=131072, ge=1024)
 
     # Sized for the 1000-endpoint target. Every aircraft holds one long-lived WebSocket

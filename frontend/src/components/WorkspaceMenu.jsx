@@ -23,12 +23,15 @@ export default function WorkspaceMenu({
   onRename,
   onDelete,
   onLeave,
+  onListDeleted,
+  onRestore,
 }) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState(null);
   const [draft, setDraft] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleted, setDeleted] = useState([]);
   const [error, setError] = useState("");
   const rootRef = useRef(null);
 
@@ -45,6 +48,13 @@ export default function WorkspaceMenu({
 
   // A menu that stays open after you click elsewhere is a menu that covers what you
   // clicked on. Escape closes it too, since it is a focus trap for keyboard users.
+  useEffect(() => {
+    if (!open) return;
+    // Fetched on open rather than continuously: it changes only when someone deletes a
+    // workspace, and the masthead is mounted for the whole session.
+    onListDeleted?.().then(setDeleted).catch(() => setDeleted([]));
+  }, [open, onListDeleted]);
+
   useEffect(() => {
     if (!open) return undefined;
     const onPointer = (event) => {
@@ -181,9 +191,11 @@ export default function WorkspaceMenu({
           {mode === "delete" && (
             <div className="stack reveal" style={{ gap: "var(--sp-2)" }}>
               <p className="subtle">
-                This destroys <strong>{active.name}</strong>, every channel in it and the
-                messages the relay holds — for all members, not just you. It cannot be
-                undone, and it does not reach copies already decrypted on anyone's device.
+                This removes <strong>{active.name}</strong>, every channel in it and the
+                messages the relay holds — for all members, not just you, and immediately.
+                You can restore it from this menu for 30 days, after which it is deleted
+                for good. Restoring cannot recover copies already decrypted on anyone's
+                device, and deleting never reached those in the first place.
               </p>
               <input
                 className="input mono"
@@ -227,6 +239,32 @@ export default function WorkspaceMenu({
                   Cancel
                 </button>
               </div>
+            </div>
+          )}
+
+          {mode === null && deleted.filter((row) => !row.expired).length > 0 && (
+            <div className="wsmenu__deleted">
+              <div className="eyebrow subtle">Recently deleted</div>
+              {deleted
+                .filter((row) => !row.expired)
+                .map((row) => (
+                  <div key={row.id} className="row row--between" style={{ gap: "var(--sp-2)" }}>
+                    <span className="truncate subtle">
+                      {row.name} · {row.restorable_for_days}d left
+                    </span>
+                    <button
+                      type="button"
+                      className="link-btn"
+                      disabled={busy}
+                      onClick={() => run(async () => {
+                        await onRestore(row.id);
+                        setDeleted((rows) => rows.filter((item) => item.id !== row.id));
+                      })}
+                    >
+                      Restore
+                    </button>
+                  </div>
+                ))}
             </div>
           )}
 

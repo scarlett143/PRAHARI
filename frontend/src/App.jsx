@@ -165,6 +165,13 @@ export default function App() {
   };
 
   const deleteWorkspace = (id) => dropWorkspace(id, workspaceApi.remove);
+
+  const restoreWorkspace = async (id) => {
+    await workspaceApi.restore(id);
+    await refreshWorkspaces();
+    setActiveWorkspaceId(id);
+    setView("messaging");
+  };
   const leaveWorkspace = (id) => dropWorkspace(id, workspaceApi.leave);
 
   function selectView(id) {
@@ -276,6 +283,8 @@ export default function App() {
             onRename={renameWorkspace}
             onDelete={deleteWorkspace}
             onLeave={leaveWorkspace}
+            onListDeleted={workspaceApi.deleted}
+            onRestore={restoreWorkspace}
           />
 
           <GooeyNav
