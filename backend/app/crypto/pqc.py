@@ -88,9 +88,30 @@ _cached: KEMBackend | None = None
 
 
 def get_backend() -> KEMBackend:
+    """The configured ML-KEM implementation.
+
+    Resolved through the settings object rather than `os.getenv` alone. The environment
+    variable is only populated as a side effect of `get_settings()`, so reading it
+    directly made the answer depend on whether anything had loaded settings yet -- and the
+    failure mode of getting that wrong is silent: a caller that arrives first receives the
+    pure-Python backend, which is documented as research grade and *not constant-time*,
+    with nothing logged to say so.
+
+    Deferred import because `config` reaches into this module during validation; at module
+    scope the two would form a cycle.
+    """
     global _cached
     if _cached is None:
-        choice = os.getenv("PQC_BACKEND", "kyber-py").strip().lower()
+        try:
+            from ..config import get_settings
+
+            choice = get_settings().pqc_backend
+        except Exception:
+            # Settings themselves are broken or unavailable (a bare unit test, a tool run
+            # outside the app). Fall back to the environment, then to the safe default.
+            choice = os.getenv("PQC_BACKEND", "kyber-py")
+
+        choice = (choice or "kyber-py").strip().lower()
         backend = _BACKENDS.get(choice)
         if backend is None:
             raise PQCError(f"unknown PQC_BACKEND {choice!r}")
