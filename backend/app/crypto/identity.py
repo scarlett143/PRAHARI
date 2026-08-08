@@ -8,6 +8,27 @@ ED25519_PUB_BYTES = 32
 BUNDLE_LABEL = b"PRAHARI-KEY-BUNDLE-V1\x00"
 SESSION_OFFER_LABEL = b"PRAHARI-SESSION-OFFER-V1\x00"
 PASSWORD_RESET_LABEL = b"PRAHARI-PASSWORD-RESET-V1\x00"
+FIRMWARE_RELEASE_LABEL = b"PRAHARI-FIRMWARE-RELEASE-V1\x00"
+
+
+def firmware_release_signing_payload(
+    *, fleet: str, version: str, measurement: bytes
+) -> bytes:
+    """Bytes an operator signs to approve one firmware image for one fleet.
+
+    Fleet and version are inside the signature, not just the digest. Signing the digest
+    alone would let a valid approval for a test fleet be replayed as approval for a
+    production one, or an old release be presented as the current version -- the signature
+    would verify in both cases because the bytes being signed never mentioned either.
+
+    Lengths precede the text fields for the usual reason: without them a fleet named "ab"
+    at version "c" and one named "a" at version "bc" produce identical input.
+    """
+    parts = [FIRMWARE_RELEASE_LABEL]
+    for field in (fleet.encode("utf-8"), version.encode("utf-8"), measurement):
+        parts.append(len(field).to_bytes(4, "big"))
+        parts.append(field)
+    return b"".join(parts)
 
 
 def verify_ed25519_signature(*, public_key: bytes, message: bytes, signature: bytes) -> bool:

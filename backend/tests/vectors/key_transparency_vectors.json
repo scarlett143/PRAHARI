@@ -1,0 +1,42 @@
+[
+  {
+    "name": "first",
+    "prev_hash": null,
+    "user_id": "user-one",
+    "seq": 1,
+    "ed25519_public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "x25519_public_key": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "ml_kem_encapsulation_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiYwABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmM=",
+    "entry_hash": "35ed8c194d47ad3f88773f67753376e128ca366fd202556fe3332a585e305aa3"
+  },
+  {
+    "name": "second",
+    "prev_hash": "35ed8c194d47ad3f88773f67753376e128ca366fd202556fe3332a585e305aa3",
+    "user_id": "user-one",
+    "seq": 2,
+    "ed25519_public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "x25519_public_key": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+    "ml_kem_encapsulation_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDE=",
+    "entry_hash": "7bf0539a195b533d7102f251bc1accff7fd19e50c47411df781f476ff3948082"
+  },
+  {
+    "name": "boundary-a",
+    "prev_hash": null,
+    "user_id": "u1",
+    "seq": 1,
+    "ed25519_public_key": "QUFCQg==",
+    "x25519_public_key": "Q0M=",
+    "ml_kem_encapsulation_key": "REQ=",
+    "entry_hash": "7a4d323b6b9d529a3589573d42c06d247f9d2bb9d2a979d7d829e55a9bed42c0"
+  },
+  {
+    "name": "boundary-b",
+    "prev_hash": null,
+    "user_id": "u1",
+    "seq": 1,
+    "ed25519_public_key": "QUE=",
+    "x25519_public_key": "QkJDQw==",
+    "ml_kem_encapsulation_key": "REQ=",
+    "entry_hash": "73c14e3dfbe6b48942c85b7cbe767d6bfeb9607586cedbd5569982c87e159ca3"
+  }
+]

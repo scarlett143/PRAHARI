@@ -6,12 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import base64
+
+from ..crypto import pqsign
 from ..blockchain.anchor import AnchorError, PolygonAnchor, leaf_hash, merkle_proof, merkle_root, verify_proof
 from ..config import get_settings
 from ..database import get_db
 from ..models import AnchorBatch, Message, channel_members
 from ..security import CurrentUser
-from .common import audit
+from .common import audit, b64e
 
 router = APIRouter(prefix="/api/v2/anchors", tags=["anchors"])
 settings = get_settings()
@@ -54,6 +57,21 @@ async def build_batch(
     await db.flush()
     for message in messages:
         message.anchor_batch_id = batch.id
+
+    # Signed before any chain publication is attempted. The attestation is about the root
+    # this server produced, and it should exist whether or not Polygon is reachable.
+    if settings.anchor_pq_secret_key:
+        try:
+            batch.pq_signature = pqsign.sign(
+                base64.b64decode(settings.anchor_pq_secret_key),
+                pqsign.anchor_signing_payload(merkle_root=root, leaf_count=len(messages)),
+            )
+            batch.pq_algorithm = pqsign.ALGORITHM
+        except pqsign.PQSignError:
+            # An unsigned batch is still Merkle-verifiable, and refusing to anchor at all
+            # because a signing key is missing would lose the proof to protect the label.
+            batch.pq_signature = None
+            batch.pq_algorithm = None
 
     chain_note = "Polygon not configured; Merkle batch verified locally"
     if settings.polygon_rpc_url and settings.anchor_contract_address and settings.anchor_private_key:
@@ -158,5 +176,10 @@ def _serialize_batch(batch: AnchorBatch, *, note: str | None = None) -> dict:
         "status": batch.status,
         "confirmed": batch.confirmed,
         "created_at": batch.created_at,
+        # Present only when an anchor signing key is configured. Absent is stated rather
+        # than implied: a batch with no signature carries no attestation of origin.
+        "pq_algorithm": batch.pq_algorithm,
+        "pq_signature": b64e(batch.pq_signature) if batch.pq_signature else None,
+        "pq_public_key": settings.anchor_pq_public_key or None,
         "note": note,
     }

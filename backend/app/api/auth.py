@@ -7,13 +7,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import security
+from .. import security, transparency
 from ..crypto import pqc, totp
 from ..database import get_db
-from ..models import Session, User
+from ..models import KeyBundleRecord, PasskeyCredential, Session, User
 from ..security import CurrentUser
 from .common import audit, b64d, b64e
 
@@ -94,7 +94,7 @@ async def register(
 
     ed_pub = b64d(body.ed25519_public_key, expect=32, field="ed25519_public_key")
     try:
-        password_hash = security.hash_password(body.password)
+        password_hash = await security.hash_password_async(body.password)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
 
@@ -115,10 +115,10 @@ async def login(
 ):
     user = (await db.execute(select(User).where(User.username == body.username))).scalars().first()
     if user is None:
-        security.consume_unknown_user_password_cost(body.password)
+        await security.consume_unknown_user_password_cost_async(body.password)
         raise HTTPException(401, "invalid credentials")
 
-    ok, rehash = security.verify_password(user.password_hash, body.password)
+    ok, rehash = await security.verify_password_async(user.password_hash, body.password)
     if not ok:
         await audit(db, event="auth.failed_login", actor_id=user.id, severity="medium", request=request)
         await db.commit()
@@ -279,7 +279,7 @@ async def recovery_reset(
         raise generic
 
     try:
-        user.password_hash = security.hash_password(body.new_password)
+        user.password_hash = await security.hash_password_async(body.new_password)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
 
@@ -293,6 +293,10 @@ async def recovery_reset(
     if user.totp_enabled or user.totp_secret:
         user.totp_enabled = False
         user.totp_secret = None
+    # Registered passkeys go for the same reason, plus one of their own: a reset is how an
+    # account is recovered after a compromise, and a passkey an attacker enrolled would
+    # otherwise survive the recovery and keep letting them in.
+    await db.execute(delete(PasskeyCredential).where(PasskeyCredential.user_id == user.id))
     await audit(
         db,
         event="auth.password_reset",
@@ -385,7 +389,7 @@ async def totp_disable(
     if not user.totp_enabled:
         raise HTTPException(409, "two-step verification is not on")
 
-    ok, _ = security.verify_password(user.password_hash, body.password)
+    ok, _ = await security.verify_password_async(user.password_hash, body.password)
     if not ok or not totp.verify(user.totp_secret, body.code):
         await audit(
             db, event="auth.totp_disable_failed", actor_id=user.id, severity="high", request=request
@@ -548,9 +552,85 @@ async def publish_keys(
     user.key_verified = True
     user.pending_challenge = None
     user.challenge_issued_at = None
-    await audit(db, event="keys.published", actor_id=user.id, request=request)
+
+    # The account row keeps only the current bundle; the chain keeps all of them. Appended
+    # in the same transaction as the overwrite above, so the log cannot end up describing
+    # a state the account never reached.
+    record = await transparency.append_bundle(
+        db,
+        user_id=user.id,
+        ed25519_public_key=user.ed25519_public_key,
+        x25519_public_key=x_pub,
+        ml_kem_encapsulation_key=ml_pub,
+        bundle_signature=bundle_sig,
+    )
+    await audit(
+        db,
+        event="keys.published",
+        actor_id=user.id,
+        request=request,
+        detail=f"seq={record.seq}",
+    )
     await db.commit()
-    return {"key_verified": True, "algorithm": f"X25519 + {pqc.ALGORITHM}"}
+    await db.refresh(record)
+    return {
+        "key_verified": True,
+        "algorithm": f"X25519 + {pqc.ALGORITHM}",
+        "transparency": {"seq": record.seq, "entry_hash": record.entry_hash.hex()},
+    }
+
+
+@router.get("/keys/{username}/history")
+async def get_key_history(
+    username: str,
+    _: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Every key bundle this account has published, oldest first.
+
+    The point of returning the whole chain rather than a verdict is that the caller can
+    check it themselves. Each entry carries the hash of the one before it, so a browser
+    can recompute the chain and compare the head against what it recorded last time; a
+    relay that dropped or rewrote an entry cannot produce a chain that still validates.
+
+    `chain_ok` is this server's own opinion, included for diagnostics. It is not evidence
+    -- a log that grades its own homework never is -- and the client recomputes regardless.
+    """
+    target = (await db.execute(select(User).where(User.username == username))).scalars().first()
+    if target is None:
+        raise HTTPException(404, "no such user")
+
+    records = (
+        await db.execute(
+            select(KeyBundleRecord)
+            .where(KeyBundleRecord.user_id == target.id)
+            .order_by(KeyBundleRecord.seq.asc())
+            # Bounded: a chain this long means something is wrong with the client, and an
+            # unbounded read here is a lever on a shared box.
+            .limit(200)
+        )
+    ).scalars().all()
+
+    chain_ok, reason = transparency.verify_chain(list(records))
+    return {
+        "user_id": target.id,
+        "username": target.username,
+        "chain_ok": chain_ok,
+        "chain_error": reason,
+        "entries": [
+            {
+                "seq": row.seq,
+                "ed25519_public_key": b64e(row.ed25519_public_key),
+                "x25519_public_key": b64e(row.x25519_public_key),
+                "ml_kem_encapsulation_key": b64e(row.ml_kem_encapsulation_key),
+                "bundle_signature": b64e(row.bundle_signature),
+                "prev_hash": row.prev_hash.hex() if row.prev_hash else None,
+                "entry_hash": row.entry_hash.hex(),
+                "created_at": row.created_at,
+            }
+            for row in records
+        ],
+    }
 
 
 @router.get("/keys/{username}")
@@ -562,6 +642,7 @@ async def get_key_bundle(
     target = (await db.execute(select(User).where(User.username == username))).scalars().first()
     if target is None or not target.key_verified:
         raise HTTPException(404, "no verified key bundle for that user")
+    head = await transparency.latest_record(db, target.id)
     return {
         "user_id": target.id,
         "username": target.username,
@@ -571,4 +652,8 @@ async def get_key_bundle(
         "bundle_signature": b64e(target.key_bundle_signature),
         "key_verified": True,
         "algorithm": f"X25519 + {pqc.ALGORITHM}",
+        # Where this bundle sits in the owner's published history, so a caller can tell a
+        # first key from a fourth one without a second request.
+        "transparency_seq": head.seq if head else None,
+        "transparency_hash": head.entry_hash.hex() if head else None,
     }
