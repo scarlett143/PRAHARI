@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fleetApi } from "../lib/api.js";
+import { bytesToBase64 } from "../crypto/bytes.js";
 import { Alert, Badge, EmptyState, Field, Panel, StatTile } from "../components/ui.jsx";
 import { integer, relativeTime } from "../lib/format.js";
 
@@ -56,7 +57,13 @@ export default function FleetRoute({ onOpenConsole }) {
     const enrolled = data.endpoints.filter((item) => item.enrolled_at).length;
     const linked = data.endpoints.filter((item) => item.link_channel_id).length;
     const pending = data.endpoints.filter((item) => !item.enrolled_at).length;
-    return { enrolled, linked, pending };
+    const contained = data.endpoints.filter(
+      (item) => item.security_state && item.security_state !== "active",
+    ).length;
+    const drifted = data.endpoints.filter(
+      (item) => item.attestation_state === "drifted",
+    ).length;
+    return { enrolled, linked, pending, contained, drifted };
   }, [data.endpoints]);
 
   const pageCount = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
@@ -68,6 +75,18 @@ export default function FleetRoute({ onOpenConsole }) {
         <StatTile label="Enrolled" value={integer(summary.enrolled)} meta="on this page" />
         <StatTile label="Linked" value={integer(summary.linked)} meta="encrypted channel open" />
         <StatTile label="Awaiting enrolment" value={integer(summary.pending)} meta="token unredeemed" />
+        <StatTile
+          label="Contained"
+          value={integer(summary.contained)}
+          meta="quarantined or revoked"
+          tone={summary.contained ? "critical" : undefined}
+        />
+        <StatTile
+          label="Firmware drift"
+          value={integer(summary.drifted)}
+          meta="reported digest differs from pin"
+          tone={summary.drifted ? "critical" : undefined}
+        />
       </div>
 
       <ProvisionPanel onProvisioned={load} />
@@ -107,6 +126,8 @@ export default function FleetRoute({ onOpenConsole }) {
                     <th scope="col">Airframe</th>
                     <th scope="col">Fleet</th>
                     <th scope="col">Identity</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Attestation</th>
                     <th scope="col">Link</th>
                     <th scope="col">Last seen</th>
                     <th scope="col"><span className="sr-only">Actions</span></th>
@@ -128,6 +149,12 @@ export default function FleetRoute({ onOpenConsole }) {
                         )}
                       </td>
                       <td>
+                        <ContainmentBadge endpoint={endpoint} />
+                      </td>
+                      <td>
+                        <AttestationCell endpoint={endpoint} onDone={load} />
+                      </td>
+                      <td>
                         {endpoint.link_channel_id ? (
                           <Badge tone="accent">channel open</Badge>
                         ) : (
@@ -136,7 +163,10 @@ export default function FleetRoute({ onOpenConsole }) {
                       </td>
                       <td className="num">{relativeTime(endpoint.last_seen_at)}</td>
                       <td>
-                        <LinkAction endpoint={endpoint} onDone={load} onOpenConsole={onOpenConsole} />
+                        <div className="row" style={{ gap: "var(--sp-2)" }}>
+                          <LinkAction endpoint={endpoint} onDone={load} onOpenConsole={onOpenConsole} />
+                          <ContainmentAction endpoint={endpoint} onDone={load} />
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -164,6 +194,259 @@ export default function FleetRoute({ onOpenConsole }) {
           </>
         )}
       </Panel>
+    </div>
+  );
+}
+
+const ATTESTATION_TONES = {
+  trusted: ["good", "matches pin"],
+  drifted: ["critical", "does not match the pinned firmware"],
+  unreported: ["warning", "pinned, but nothing reported yet"],
+  unpinned: ["neutral", "no approved firmware recorded"],
+};
+
+/**
+ * Pin the firmware digest an endpoint should report, and show whether it does.
+ *
+ * The digest is computed here, in the browser, from the image the operator selects. That
+ * keeps a possibly large firmware file off the network and off the server entirely -- all
+ * that is ever uploaded is 32 bytes.
+ */
+function AttestationCell({ endpoint, onDone }) {
+  const [open, setOpen] = useState(false);
+  const [digest, setDigest] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const state = endpoint.attestation_state || "unpinned";
+  const [tone, hint] = ATTESTATION_TONES[state] ?? ATTESTATION_TONES.unpinned;
+
+  async function hashFile(file) {
+    setError("");
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      setDigest(bytesToBase64(hash));
+    } catch (caught) {
+      setError(`Could not read that file: ${caught.message}`);
+    }
+  }
+
+  async function save(value) {
+    setBusy(true);
+    setError("");
+    try {
+      await fleetApi.pinMeasurement(endpoint.callsign, value);
+      setOpen(false);
+      setDigest("");
+      await onDone();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="stack" style={{ gap: "var(--sp-1)" }}>
+      <Badge tone={tone} title={hint}>{state}</Badge>
+
+      {state === "drifted" && (
+        <span className="subtle mono" title="pinned → reported">
+          {endpoint.expected_measurement} → {endpoint.last_measurement}
+        </span>
+      )}
+
+      {open ? (
+        <div className="stack reveal" style={{ gap: "var(--sp-2)", minWidth: "240px" }}>
+          <input
+            type="file"
+            className="input"
+            aria-label="Firmware image to hash"
+            onChange={(changeEvent) => {
+              const file = changeEvent.target.files?.[0];
+              if (file) hashFile(file);
+            }}
+          />
+          <input
+            className="input mono"
+            placeholder="or paste the base64 SHA-256"
+            aria-label="Firmware digest, base64 SHA-256"
+            value={digest}
+            onChange={(changeEvent) => setDigest(changeEvent.target.value.trim())}
+          />
+          <p className="subtle">
+            Hashed in this browser; only the 32-byte digest is uploaded. A self-reported
+            measurement proves the endpoint holds its key, not what it is running.
+          </p>
+          {error && <Alert tone="error">{error}</Alert>}
+          <div className="row" style={{ gap: "var(--sp-2)" }}>
+            <button className="btn btn--sm" disabled={busy || !digest} onClick={() => save(digest)}>
+              {busy ? "Saving…" : "Pin"}
+            </button>
+            {endpoint.expected_measurement && (
+              <button className="link-btn" disabled={busy} onClick={() => save("")}>
+                Clear pin
+              </button>
+            )}
+            <button
+              className="link-btn"
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                setError("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button className="link-btn" onClick={() => setOpen(true)}>
+          {endpoint.expected_measurement ? "Re-pin firmware" : "Pin firmware"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ContainmentBadge({ endpoint }) {
+  const state = endpoint.security_state || "active";
+  if (state === "revoked") {
+    return (
+      <Badge tone="critical" glyph="⊘" title={endpoint.security_state_reason || undefined}>
+        revoked
+      </Badge>
+    );
+  }
+  if (state === "quarantined") {
+    return (
+      <Badge tone="warning" glyph="⏻" title={endpoint.security_state_reason || undefined}>
+        quarantined
+      </Badge>
+    );
+  }
+  return <Badge tone="neutral">in service</Badge>;
+}
+
+/**
+ * Cut an endpoint off, or bring a suspended one back.
+ *
+ * Revocation asks for the callsign to be typed out. That is not ceremony: it is the one
+ * action here with no undo, it destroys the enrolment path, and the button sits in a
+ * dense table one row away from "Establish link".
+ */
+function ContainmentAction({ endpoint, onDone }) {
+  const [mode, setMode] = useState(null);
+  const [reason, setReason] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const state = endpoint.security_state || "active";
+
+  function close() {
+    setMode(null);
+    setReason("");
+    setConfirm("");
+    setError("");
+  }
+
+  async function run(action) {
+    setBusy(true);
+    setError("");
+    try {
+      await action();
+      close();
+      await onDone();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (state === "revoked") {
+    return <span className="subtle">no route back</span>;
+  }
+
+  if (mode) {
+    const revoking = mode === "revoke";
+    return (
+      <div className="stack reveal" style={{ gap: "var(--sp-2)", minWidth: "220px" }}>
+        <input
+          className="input"
+          placeholder="Reason (recorded in the audit log)"
+          aria-label="Containment reason"
+          value={reason}
+          onChange={(changeEvent) => setReason(changeEvent.target.value)}
+        />
+        {revoking && (
+          <>
+            <p className="subtle">
+              Permanent. The enrolment path is destroyed and this callsign cannot return to
+              service. Rotate the channel epoch as well — revocation stops the endpoint
+              authenticating, it does not make what it already holds unreadable.
+            </p>
+            <input
+              className="input mono"
+              placeholder={`Type ${endpoint.callsign} to confirm`}
+              aria-label={`Type ${endpoint.callsign} to confirm revocation`}
+              value={confirm}
+              onChange={(changeEvent) => setConfirm(changeEvent.target.value)}
+            />
+          </>
+        )}
+        {error && <Alert tone="error">{error}</Alert>}
+        <div className="row" style={{ gap: "var(--sp-2)" }}>
+          <button
+            className={revoking ? "btn btn--sm btn--danger" : "btn btn--sm"}
+            disabled={busy || (revoking && confirm !== endpoint.callsign)}
+            onClick={() =>
+              run(() =>
+                revoking
+                  ? fleetApi.revoke(endpoint.callsign, reason)
+                  : fleetApi.quarantine(endpoint.callsign, reason),
+              )
+            }
+          >
+            {busy ? "Working…" : revoking ? "Revoke permanently" : "Quarantine"}
+          </button>
+          <button className="link-btn" onClick={close} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="row" style={{ gap: "var(--sp-2)" }}>
+      {state === "quarantined" ? (
+        <button
+          className="btn btn--sm"
+          disabled={busy}
+          title="Return this endpoint to service. It must re-authenticate."
+          onClick={() => run(() => fleetApi.restore(endpoint.callsign))}
+        >
+          {busy ? "Working…" : "Restore"}
+        </button>
+      ) : (
+        <button
+          className="btn btn--sm"
+          title="Suspend this endpoint. Reversible."
+          onClick={() => setMode("quarantine")}
+        >
+          Quarantine
+        </button>
+      )}
+      <button
+        className="link-btn"
+        title="Permanently cut off a captured or cloned endpoint"
+        onClick={() => setMode("revoke")}
+      >
+        Revoke
+      </button>
     </div>
   );
 }

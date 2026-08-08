@@ -83,6 +83,33 @@ class ConnectionManager:
                 return True
             return False
 
+    async def close_user(self, user_id: str, *, code: int = 1008, reason: str = "revoked") -> int:
+        """Force every live socket of one identity closed. Returns how many were cut.
+
+        Revoking a session marks the database row, which stops the *next* request -- but a
+        WebSocket that is already open never makes another one, so a quarantined endpoint
+        would keep streaming on the connection it established while it was still trusted.
+        A kill switch that leaves the existing link up is not a kill switch.
+
+        The sockets are removed from the registry before being closed, so a concurrent
+        fan-out cannot pick them up in the window between the two.
+        """
+        async with self._lock:
+            sockets = list(self._connections.pop(user_id, ()))
+            self._count = max(0, self._count - len(sockets))
+
+        cut = 0
+        for websocket in sockets:
+            try:
+                await asyncio.wait_for(
+                    websocket.close(code=code, reason=reason), timeout=SEND_TIMEOUT_SECONDS
+                )
+            except Exception:
+                # Already gone, which is the outcome we wanted anyway.
+                pass
+            cut += 1
+        return cut
+
     async def notify_users(self, user_ids: list[str], payload: dict) -> int:
         """Deliver a payload to every live socket of the given users.
 

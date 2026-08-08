@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import security
 from ..database import get_db
 from ..models import Channel, Server, UavProfile, User, _uuid, server_members
+from ..realtime import manager
 from ..security import CurrentUser
 from .common import audit, b64d
 
@@ -29,6 +30,33 @@ router = APIRouter(prefix="/api/v2/fleet", tags=["fleet"])
 
 #: Placeholder identity key held until the aircraft enrols and presents its real one.
 UNENROLLED_ED25519 = bytes(32)
+
+#: Containment states. `QUARANTINED` is reversible -- an aircraft that stopped answering,
+#: or one flagged pending investigation. `REVOKED` is not: it is for an endpoint believed
+#: captured or cloned, and it destroys the enrolment path so the callsign cannot be
+#: brought back with the same credentials.
+ACTIVE = "active"
+QUARANTINED = "quarantined"
+REVOKED = "revoked"
+
+#: Attestation verdicts, derived on read rather than stored -- there is no state here that
+#: is not already implied by the two measurements, and a stored copy could disagree.
+UNPINNED = "unpinned"      # operator has not said what this endpoint should be running
+UNREPORTED = "unreported"  # pinned, but the aircraft has not reported since
+TRUSTED = "trusted"
+DRIFTED = "drifted"
+
+
+def attestation_state(profile: UavProfile) -> str:
+    if not profile.expected_measurement:
+        return UNPINNED
+    if not profile.last_measurement:
+        return UNREPORTED
+    # Constant-time: the comparison is against a value the caller supplied, and a timing
+    # difference would let one be searched for byte by byte.
+    return TRUSTED if hmac.compare_digest(
+        profile.expected_measurement, profile.last_measurement
+    ) else DRIFTED
 FLEET_SERVER_NAME = "Fleet Operations"
 MAX_BULK_PROVISION = 1000
 
@@ -104,7 +132,20 @@ def _serialize(profile: UavProfile, account: User) -> dict:
         "last_seen_at": profile.last_seen_at,
         "link_channel_id": profile.link_channel_id,
         "created_at": profile.created_at,
+        "security_state": profile.security_state or ACTIVE,
+        "security_state_at": profile.security_state_at,
+        "security_state_reason": profile.security_state_reason,
+        "attestation_state": attestation_state(profile),
+        # Hex, and only the leading bytes: enough for an operator to compare two digests
+        # by eye, without printing a full measurement into every listing.
+        "expected_measurement": _digest_prefix(profile.expected_measurement),
+        "last_measurement": _digest_prefix(profile.last_measurement),
+        "last_measurement_at": profile.last_measurement_at,
     }
+
+
+def _digest_prefix(value: bytes | None, length: int = 8) -> str | None:
+    return value.hex()[: length * 2] if value else None
 
 
 def _provision_one(
@@ -232,10 +273,17 @@ async def enroll(
         else None
     )
 
-    # Uniform failure: never reveal whether the callsign exists or the token was wrong.
+    # Uniform failure: never reveal whether the callsign exists, the token was wrong, or
+    # the endpoint is contained.
+    #
+    # The containment check belongs here rather than after it. Enrolment ends with
+    # `account.status = "active"`, so without this an endpoint quarantined before it ever
+    # enrolled could be brought straight back into service by whoever holds its token --
+    # which, if the token is why it was quarantined, is precisely the wrong person.
     if (
         profile is None
         or account is None
+        or profile.security_state in (QUARANTINED, REVOKED)
         or not profile.enrollment_token_hash
         or not verify_enrollment_token(profile.enrollment_token_hash, body.enrollment_token)
     ):
@@ -307,7 +355,12 @@ async def device_challenge(
     profile = (
         await db.execute(select(UavProfile).where(UavProfile.callsign == body.callsign))
     ).scalars().first()
-    if profile is not None and profile.enrolled_at is not None:
+    # A contained endpoint is answered like any unknown callsign: it still receives a
+    # well-formed nonce, but nothing is recorded, so the signature it returns can never be
+    # redeemed. Refusing here instead would turn this endpoint into an oracle for which
+    # aircraft have been quarantined.
+    contained = profile is not None and profile.security_state in (QUARANTINED, REVOKED)
+    if profile is not None and profile.enrolled_at is not None and not contained:
         profile.auth_challenge = challenge
         profile.auth_challenge_issued_at = datetime.now(timezone.utc)
         await db.commit()
@@ -439,6 +492,221 @@ async def list_uavs(
     }
 
 
+class ContainmentRequest(BaseModel):
+    reason: str = Field(default="", max_length=256)
+
+
+async def _owned_profile(db: AsyncSession, callsign: str, operator: User) -> tuple[UavProfile, User]:
+    profile = (
+        await db.execute(
+            select(UavProfile).where(
+                UavProfile.callsign == callsign, UavProfile.operator_id == operator.id
+            )
+        )
+    ).scalars().first()
+    if profile is None:
+        raise HTTPException(404, "aircraft not found")
+    account = (await db.execute(select(User).where(User.id == profile.user_id))).scalars().first()
+    if account is None:
+        raise HTTPException(404, "aircraft not found")
+    return profile, account
+
+
+async def _contain(
+    db: AsyncSession,
+    *,
+    profile: UavProfile,
+    account: User,
+    operator: User,
+    request: Request,
+    state: str,
+    reason: str,
+) -> int:
+    """Cut an endpoint off, in the order that closes every door before reporting success.
+
+    Sequence matters here. Marking the account is what refuses the *next* token request,
+    but an aircraft that already holds a valid token would keep working until it expired,
+    and one holding an open WebSocket would never make another request at all. So all
+    three are taken down together: the account status, every recorded session, and the
+    live sockets.
+    """
+    now = datetime.now(timezone.utc)
+    profile.security_state = state
+    profile.security_state_at = now
+    profile.security_state_reason = reason.strip() or None
+    account.status = state
+    # A pending challenge is a half-finished authentication; leaving it would let a
+    # signature computed moments before containment still be redeemed.
+    profile.auth_challenge = None
+    profile.auth_challenge_issued_at = None
+
+    if state == REVOKED:
+        # Permanent by construction rather than by policy. Clearing the enrolment hash
+        # means the callsign cannot be re-enrolled with the credential that was captured,
+        # and dropping key_verified makes the link path refuse it even if something later
+        # flips the status back.
+        profile.enrollment_token_hash = None
+        account.key_verified = False
+
+    revoked = await security.revoke_sessions(db, user_id=account.id)
+    await audit(
+        db,
+        event=f"fleet.{state}",
+        severity="high",
+        actor_id=operator.id,
+        request=request,
+        detail=f"callsign={profile.callsign};sessions={revoked};reason={reason.strip()[:120]}",
+    )
+    await db.commit()
+    await manager.close_user(account.id, reason=state)
+    return revoked
+
+
+@router.post("/uavs/{callsign}/quarantine")
+async def quarantine_endpoint(
+    callsign: str,
+    body: ContainmentRequest,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Suspend an endpoint, reversibly.
+
+    For the ambiguous case -- an aircraft behaving oddly, or off the air longer than it
+    should be -- where cutting it off is prudent but destroying its enrolment is not.
+    """
+    await _require_operator(user)
+    profile, account = await _owned_profile(db, callsign, user)
+    if profile.security_state == REVOKED:
+        raise HTTPException(409, "endpoint is revoked; revocation cannot be downgraded")
+
+    revoked = await _contain(
+        db, profile=profile, account=account, operator=user,
+        request=request, state=QUARANTINED, reason=body.reason,
+    )
+    return {"callsign": callsign, "security_state": QUARANTINED, "sessions_revoked": revoked}
+
+
+@router.post("/uavs/{callsign}/revoke")
+async def revoke_endpoint(
+    callsign: str,
+    body: ContainmentRequest,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Permanently cut off an endpoint believed captured, cloned or compromised.
+
+    What this cannot do is worth stating plainly: it revokes the endpoint's ability to
+    *authenticate to this relay*. It does not reach the aircraft, and it does not make
+    ciphertext an attacker already holds unreadable. Messages the endpoint sent before
+    revocation stay exactly as readable to whoever holds the keys as they were before.
+    Rotate the channel epoch to stop it reading anything sent after this point.
+    """
+    await _require_operator(user)
+    profile, account = await _owned_profile(db, callsign, user)
+
+    revoked = await _contain(
+        db, profile=profile, account=account, operator=user,
+        request=request, state=REVOKED, reason=body.reason,
+    )
+    return {"callsign": callsign, "security_state": REVOKED, "sessions_revoked": revoked}
+
+
+@router.post("/uavs/{callsign}/restore")
+async def restore_endpoint(
+    callsign: str,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Return a quarantined endpoint to service. Revocation is deliberately not reversible."""
+    await _require_operator(user)
+    profile, account = await _owned_profile(db, callsign, user)
+    if profile.security_state == REVOKED:
+        raise HTTPException(
+            409,
+            "a revoked endpoint cannot be restored; provision a new callsign and re-enrol it",
+        )
+    if (profile.security_state or ACTIVE) == ACTIVE:
+        return {"callsign": callsign, "security_state": ACTIVE, "sessions_revoked": 0}
+
+    profile.security_state = ACTIVE
+    profile.security_state_at = datetime.now(timezone.utc)
+    profile.security_state_reason = None
+    account.status = ACTIVE
+    await audit(
+        db,
+        event="fleet.restored",
+        severity="high",
+        actor_id=user.id,
+        request=request,
+        detail=f"callsign={callsign}",
+    )
+    await db.commit()
+    # The aircraft must re-authenticate: containment revoked its sessions, and restoring
+    # does not hand them back.
+    return {"callsign": callsign, "security_state": ACTIVE, "sessions_revoked": 0}
+
+
+class AttestationPinRequest(BaseModel):
+    #: Base64 SHA-256 of the approved firmware or boot image. Empty clears the pin.
+    measurement_b64: str = Field(default="", max_length=128)
+
+
+@router.post("/uavs/{callsign}/attestation")
+async def pin_measurement(
+    callsign: str,
+    body: AttestationPinRequest,
+    user: CurrentUser,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Record which firmware digest this endpoint is supposed to be running.
+
+    Read the limit before relying on this. The measurement is *self-reported* over an
+    authenticated channel: it proves the endpoint holds its enrolment key, not that it is
+    running the software it names. An attacker who controls the airframe can report the
+    digest the operator pinned while running anything at all. Only a hardware root of
+    trust -- a TPM or secure element signing the measurement with a key the main processor
+    cannot read -- would close that, and this fleet does not assume one.
+
+    What it does catch is the common case rather than the clever one: a downgrade, a
+    mis-flashed image, an unapproved build, an endpoint that came back from maintenance
+    running something nobody signed off. That is worth having, provided nobody mistakes it
+    for proof the aircraft is honest.
+    """
+    await _require_operator(user)
+    profile, _ = await _owned_profile(db, callsign, user)
+
+    previous = profile.expected_measurement
+    if body.measurement_b64:
+        measurement = b64d(body.measurement_b64, expect=32, field="measurement_b64")
+        profile.expected_measurement = measurement
+    else:
+        profile.expected_measurement = None
+
+    await audit(
+        db,
+        event="fleet.attestation_pinned" if body.measurement_b64 else "fleet.attestation_cleared",
+        severity="high",
+        actor_id=user.id,
+        request=request,
+        detail=(
+            f"callsign={callsign};"
+            f"was={_digest_prefix(previous) or 'none'};"
+            f"now={_digest_prefix(profile.expected_measurement) or 'none'}"
+        ),
+    )
+    await db.commit()
+    await db.refresh(profile)
+    return {
+        "callsign": callsign,
+        "attestation_state": attestation_state(profile),
+        "expected_measurement": _digest_prefix(profile.expected_measurement),
+    }
+
+
 @router.post("/uavs/{callsign}/link")
 async def establish_link_channel(
     callsign: str,
@@ -520,12 +788,24 @@ async def establish_link_channel(
     }
 
 
+class HeartbeatRequest(BaseModel):
+    #: Optional so an aircraft running older firmware keeps reporting liveness.
+    measurement_b64: str = Field(default="", max_length=128)
+
+
 @router.post("/heartbeat")
 async def heartbeat(
     user: CurrentUser,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: HeartbeatRequest | None = None,
 ):
-    """Liveness ping from an aircraft. Carries no telemetry -- that stays encrypted."""
+    """Liveness ping from an aircraft. Carries no telemetry -- that stays encrypted.
+
+    The optional firmware measurement rides along here rather than on an endpoint of its
+    own: it is the same claim on the same schedule, and a second request per heartbeat
+    across a thousand endpoints is load this deployment cannot spend.
+    """
     if user.kind != "uav":
         raise HTTPException(403, "only unmanned endpoints report a heartbeat")
     profile = (
@@ -533,7 +813,35 @@ async def heartbeat(
     ).scalars().first()
     if profile is None:
         raise HTTPException(404, "no fleet profile for this endpoint")
+
     now = datetime.now(timezone.utc)
     profile.last_seen_at = now
+
+    if body is not None and body.measurement_b64:
+        measurement = b64d(body.measurement_b64, expect=32, field="measurement_b64")
+        drifted_before = attestation_state(profile) == DRIFTED
+        profile.last_measurement = measurement
+        profile.last_measurement_at = now
+        # Audited only on the transition into drift. Logging every heartbeat of a drifted
+        # endpoint would bury the moment it happened under thousands of identical rows,
+        # and the audit table lives on a disk shared with the operator's other services.
+        if attestation_state(profile) == DRIFTED and not drifted_before:
+            await audit(
+                db,
+                event="fleet.attestation_drift",
+                severity="high",
+                actor_id=user.id,
+                request=request,
+                detail=(
+                    f"callsign={profile.callsign};"
+                    f"expected={_digest_prefix(profile.expected_measurement)};"
+                    f"reported={_digest_prefix(measurement)}"
+                ),
+            )
+
     await db.commit()
-    return {"callsign": profile.callsign, "last_seen_at": now}
+    return {
+        "callsign": profile.callsign,
+        "last_seen_at": now,
+        "attestation_state": attestation_state(profile),
+    }
