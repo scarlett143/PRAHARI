@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     #: socket holds kernel and application buffers, so this is a real memory ceiling.
     max_websocket_connections: int = Field(default=200, ge=0)
 
+    #: WebAuthn relying party. `rp_id` must be the site's registrable domain (or a parent
+    #: of it) and is what the authenticator binds a credential to; changing it invalidates
+    #: every passkey already registered. Empty means "derive from the first allowed
+    #: origin", which is right for development and explicit in production.
+    webauthn_rp_id: str = Field(default="")
+    webauthn_rp_name: str = Field(default="PRAHARI")
+
+    #: Base64 ML-DSA-65 secret key used to sign anchor roots. Unset means batches are
+    #: Merkle-verifiable but carry no attestation of origin, which is stated rather
+    #: than hidden. Generate with app.crypto.pqsign.generate_keypair().
+    anchor_pq_secret_key: str = Field(default="")
+    anchor_pq_public_key: str = Field(default="")
+
     polygon_rpc_url: str = Field(default="")
     anchor_contract_address: str = Field(default="")
     anchor_private_key: str = Field(default="")
@@ -57,6 +70,13 @@ class Settings(BaseSettings):
     qiskit_ibm_token: str = Field(default="")
     qiskit_ibm_instance: str = Field(default="")
     qiskit_ibm_channel: str = Field(default="ibm_quantum_platform")
+
+    #: The quantum lab is a demonstration, and by far the most expensive thing this
+    #: service can be asked to do. Left on by default so development and the test suite
+    #: behave as before, and turned off automatically in production unless someone opts
+    #: back in -- a teaching endpoint has no claim on the CPU of a box carrying live
+    #: customer sites. Set `QUANTUM_LAB_ENABLED=true` to run it there anyway.
+    quantum_lab_enabled_override: bool | None = Field(default=None, alias="QUANTUM_LAB_ENABLED")
 
     @field_validator("database_url")
     @classmethod
@@ -70,6 +90,33 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.strip().lower() in {"production", "prod"}
+
+    @property
+    def quantum_lab_enabled(self) -> bool:
+        if self.quantum_lab_enabled_override is not None:
+            return self.quantum_lab_enabled_override
+        return not self.is_production
+
+    @property
+    def webauthn_origins(self) -> list[str]:
+        """Origins a passkey ceremony may come from.
+
+        The CORS list, reused rather than duplicated: a second list of allowed origins is
+        a second thing to forget to update, and the two would silently disagree the first
+        time a domain moved.
+        """
+        return self.cors_origin_list
+
+    @property
+    def webauthn_relying_party(self) -> str:
+        if self.webauthn_rp_id:
+            return self.webauthn_rp_id
+        # Derived from the first allowed origin: strip the scheme, then the port. An RP ID
+        # is a bare domain -- "https://x.example:8443" is not one and the authenticator
+        # would reject the ceremony rather than say why.
+        first = next(iter(self.webauthn_origins), "")
+        host = first.split("://", 1)[-1].split("/", 1)[0]
+        return host.rsplit(":", 1)[0] if ":" in host else host
 
     @property
     def cors_origin_list(self) -> list[str]:

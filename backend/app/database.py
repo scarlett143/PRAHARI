@@ -68,6 +68,20 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("session_offers", "wrapped_group_key", "BINARY"),
     ("users", "totp_secret", "VARCHAR"),
     ("users", "totp_enabled", "BOOLEAN"),
+    ("messages", "deleted_at", "TIMESTAMP"),
+    ("uav_profiles", "security_state", "VARCHAR"),
+    ("uav_profiles", "security_state_at", "TIMESTAMP"),
+    ("uav_profiles", "security_state_reason", "VARCHAR"),
+    ("anchor_batches", "pq_signature", "BINARY"),
+    ("anchor_batches", "pq_algorithm", "VARCHAR"),
+    ("audit_logs", "seq", "INTEGER"),
+    ("audit_logs", "prev_hash", "BINARY"),
+    ("audit_logs", "entry_hash", "BINARY"),
+    ("users", "webauthn_challenge", "VARCHAR"),
+    ("users", "webauthn_challenge_at", "TIMESTAMP"),
+    ("uav_profiles", "expected_measurement", "BINARY"),
+    ("uav_profiles", "last_measurement", "BINARY"),
+    ("uav_profiles", "last_measurement_at", "TIMESTAMP"),
 )
 
 _COLUMN_TYPES = {
@@ -76,6 +90,9 @@ _COLUMN_TYPES = {
     # Added NOT NULL would fail on a table with rows, so it arrives nullable with a
     # default and the model treats NULL as "off".
     "BOOLEAN": {"postgresql": "BOOLEAN DEFAULT FALSE", "sqlite": "BOOLEAN DEFAULT 0"},
+    # Nullable throughout: NULL is the meaningful "never happened" state, so no default.
+    "TIMESTAMP": {"postgresql": "TIMESTAMPTZ", "sqlite": "DATETIME"},
+    "INTEGER": {"postgresql": "INTEGER", "sqlite": "INTEGER"},
 }
 
 
